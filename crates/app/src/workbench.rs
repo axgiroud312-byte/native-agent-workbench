@@ -1,9 +1,6 @@
 use std::path::PathBuf;
 
-use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, TitleBar,
-    button::{Button, ButtonVariants},
-};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, TitleBar, button::Button};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -22,7 +19,7 @@ pub struct Workbench {
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        window.focus(&focus);
+        window.focus(&focus, cx);
         Self {
             focus,
             directory: None,
