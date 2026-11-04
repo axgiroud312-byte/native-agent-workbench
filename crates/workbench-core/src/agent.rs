@@ -8,6 +8,8 @@ use crate::{AgentCommandId, AgentId, AgentOptionId, ConnectionEpoch};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AgentDefinition {
+    #[serde(default)]
+    pub launch: Option<AgentLaunchConfiguration>,
     pub id: AgentId,
     pub name: String,
     pub source: AgentSource,
@@ -18,12 +20,26 @@ pub struct AgentDefinition {
 impl AgentDefinition {
     pub fn new(id: AgentId, name: impl Into<String>, source: AgentSource) -> Self {
         Self {
+            launch: None,
             id,
             name: name.into(),
             source,
             distributions: Vec::new(),
             discovery: AgentDiscovery::NotChecked,
         }
+    }
+}
+
+/// Non-secret local launch settings. Authentication material stays in official Agent flows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AgentLaunchConfiguration {
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+}
+impl AgentLaunchConfiguration {
+    pub fn new(executable: PathBuf, args: Vec<String>) -> Self {
+        Self { executable, args }
     }
 }
 
@@ -195,8 +211,18 @@ pub struct AgentCapabilities {
     pub commands: Vec<AgentCommand>,
     pub attachments: AttachmentCapabilities,
     pub questions: QuestionCapabilities,
+    #[serde(default)]
+    pub client_questions: QuestionCapabilities,
     pub steering: CapabilitySupport,
+    /// Separately negotiated extension behavior; top-level steering support is insufficient.
+    #[serde(default)]
+    pub steering_prompt_required: CapabilitySupport,
+    #[serde(default)]
+    pub steering_source: Option<ProtocolFeatureSource>,
     pub session_resume: CapabilitySupport,
+    /// session/load is a distinct operation with Agent history replay.
+    #[serde(default)]
+    pub history_load: CapabilitySupport,
     /// Reattaching an active run is separate from opening its session again.
     pub active_run_recovery: CapabilitySupport,
     pub configuration_during_run: CapabilitySupport,
@@ -212,10 +238,28 @@ impl AgentCapabilities {
             commands: Vec::new(),
             attachments: AttachmentCapabilities::default(),
             questions: QuestionCapabilities::default(),
+            client_questions: QuestionCapabilities::default(),
             steering: CapabilitySupport::Unknown,
+            steering_prompt_required: CapabilitySupport::Unknown,
+            steering_source: None,
             session_resume: CapabilitySupport::Unknown,
+            history_load: CapabilitySupport::Unknown,
             active_run_recovery: CapabilitySupport::Unknown,
             configuration_during_run: CapabilitySupport::Unknown,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProtocolFeatureSource {
+    Standard {
+        protocol: String,
+        version: String,
+    },
+    Extension {
+        method: String,
+        adapter: String,
+        version: String,
+    },
 }

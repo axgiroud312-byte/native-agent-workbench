@@ -1,6 +1,6 @@
 # 共享业务对象：身份与生命周期（Issue #3）
 
-`workbench-core` 是 UI、Runtime 和 Storage 共同引用的业务类型来源，不依赖 GPUI、ACP、Tokio 或 SQLite。本版只定义对象、身份、状态事实及序列化含义。命令/事件信封、状态更新器、重复/晚到事件处理、错误与服务接口属于 #4；本项没有实现这些功能。
+`workbench-core` 是 UI、Runtime 和 Storage 共同引用的业务类型来源，不依赖 GPUI、ACP、Tokio 或 SQLite。本文记录 #3 对象基础；#4 的命令/事件、唯一 reducer、快照和服务接口见 [共享契约](contracts.md)。
 
 对应 R-15、R-16、R-17、R-20、R-21、R-49、R-50、R-57、R-58、R-62；为 AC-04、AC-14、AC-19 提供类型基础，**不表示这些真实运行验收已通过**。
 
@@ -70,7 +70,7 @@ flowchart LR
 
 请求状态为 `Pending → Submitting → ResponseSubmitted`，也可明确 `ResponseRejected`、`OutcomeUnknown` 或 `Invalidated`。`ResponseSubmitted` 只表示响应已成功交给 SDK/协议响应通道，因此不再等待用户答复；它不表示 Agent 另发了二次 ACK，也不证明被授权的操作已执行。不能依赖协议未承诺的确认事件。明确未交付可记录 ResponseRejected；结果未知时先核对，不重发。`is_actionable()` 只表达本条状态允许响应，最终还须验证会话、运行、代次一致，以及运行未取消/终止。失效记录不能复活：运行结束、取消、断连、替换、会话删除、Agent 撤回或过期均有独立原因；重连如 Agent 再次发问，分配新本地 RequestId，保存旧记录。SDK 回调属于 Runtime 的临时资源，不序列化；重启读取请求历史不能恢复可点击的旧回调。
 
-权限选项 ID 取自 Agent；允许/拒绝的语义和范围仅供显示与传递，工作台不建立第二套访问政策。提问可表达文本、单选、多选及多个字段组成的表单；响应按 AgentFieldId 回传。必填、选项有效性、自填许可和单/多选数量由 #4 的业务校验按真实 schema 判断，序列化本身不是完整业务验证。
+权限选项 ID 取自 Agent；允许/拒绝的语义和范围仅供显示与传递，工作台不建立第二套访问政策。提问可表达文本、单选、多选及多个字段组成的表单；响应按 AgentFieldId 回传。必填、选项有效性、自填许可和单/多选数量由 #4 的业务校验按真实 schema 判断，序列化本身不是完整业务验证。#4 另有 Declined、保留原 schema 的 Unsupported 字段和 secret 标记；未知 required 不能静默省略。
 
 ## 配置与能力
 
@@ -104,6 +104,6 @@ flowchart LR
 
 ## 已有代码与文档边界
 
-Spec 的概念表包含 AgentEvent，但任务路线明确先 #3 对象、再 #4 事件。本版没有提前加入 AgentEvent 或更新器。Spec 举例的 Idle 在本实现由 `current_run_id = None` 表达，避免与 Run.state 重复保存；其余执行事实保留独立表达。README 与 task-plan 对“尚未实现共享业务对象”的描述将由主控按集成阶段更新，本任务按授权范围不修改这些共享文件。
+Spec 的概念表包含 AgentEvent；#4 以 Event/EventEnvelope 和 JournalRecord 提供该契约，详见 contracts.md。Spec 举例的 Idle 在本实现由 `current_run_id = None` 表达，避免与 Run.state 重复保存；其余执行事实保留独立表达。README/task-plan 的阶段性状态由主控随集成更新，本任务不修改这些共享文件。
 
 `tests/serialization.rs` 使用虚构中文项目路径、托管 PNG、多个同时等待请求、运行工具、队列编辑后快照、未知提交、配置三个阶段及恢复区别，做少量序列化往返检查；不连接 Agent、窗口或数据库。

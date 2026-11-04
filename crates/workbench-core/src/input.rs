@@ -146,6 +146,11 @@ pub enum SubmissionIntent {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SubmissionState {
     Prepared,
+    NotConsumed {
+        epoch: ConnectionEpoch,
+        attempt_id: crate::AttemptId,
+        observed_at: Timestamp,
+    },
     AwaitingAcknowledgement {
         epoch: ConnectionEpoch,
         sent_at: Timestamp,

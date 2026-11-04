@@ -2,7 +2,7 @@
 
 Windows 优先的开源原生 Agent 工作台，使用 Rust、GPUI Kit 和 ACP，先把 Codex 的日常工作体验做好。
 
-**当前状态：已有 Rust + GPUI Kit 最小启动工程，以及共享业务对象与生命周期类型。命令/事件、Agent、会话存储和托盘尚未接入，没有正式安装包。**
+**当前状态：已有 Rust + GPUI Kit 最小启动工程，以及共享业务对象、命令/事件和状态更新契约。Agent、会话存储和托盘尚未接入，没有正式安装包。**
 
 目标是一个不透明炭灰色、弱外框和弱顶栏的双栏窗口：左侧组织项目与会话，右侧完成输入、流式对话、工具执行、审批和结果查看。多个会话可在同一项目目录并行工作；关闭窗口后收进托盘继续运行。
 
@@ -43,7 +43,7 @@ cargo run --locked
 
 目录结构：`crates/app/src/main.rs` 负责启动与生命周期，`theme.rs` 集中主题与尺寸，`workbench.rs` 持有窗口状态和目录选择交互。随着实际功能增长再拆分 crate。
 
-`crates/workbench-core` 提供独立于 UI、协议和数据库的共享业务类型；身份、状态与所有权见 [业务对象说明](docs/architecture/domain-model.md)。这部分已有序列化样例检查，不代表会话或 Agent 功能已可使用。
+`crates/workbench-core` 提供独立于 UI、协议和数据库的共享业务类型、唯一状态更新器和异步服务接口；见 [业务对象说明](docs/architecture/domain-model.md) 与 [命令/事件契约](docs/architecture/contracts.md)。序列化和关键状态场景已有定向检查，不代表会话或 Agent 功能已可使用。
 
 ## 本地开发技能
 

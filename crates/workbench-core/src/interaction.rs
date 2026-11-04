@@ -189,6 +189,11 @@ impl PermissionRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QuestionFieldKind {
+    /// The adapter preserves an unsupported schema internally; never silently omit it.
+    Unsupported {
+        type_name: String,
+        schema: serde_json::Value,
+    },
     Text {
         multiline: bool,
     },
@@ -205,6 +210,8 @@ pub enum QuestionFieldKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct QuestionField {
+    #[serde(default)]
+    pub is_secret: bool,
     pub id: AgentFieldId,
     pub prompt: String,
     pub required: bool,
@@ -214,6 +221,7 @@ pub struct QuestionField {
 impl QuestionField {
     pub fn new(id: AgentFieldId, prompt: impl Into<String>, kind: QuestionFieldKind) -> Self {
         Self {
+            is_secret: false,
             id,
             prompt: prompt.into(),
             required: true,
@@ -251,6 +259,7 @@ impl QuestionAnswer {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QuestionResponse {
     Answered { answers: Vec<QuestionAnswer> },
+    Declined,
     Cancelled,
 }
 

@@ -51,6 +51,10 @@ local_ids!(
     QueuedInputId,
     SubmissionId,
     ResponseAttemptId,
+    CommandId,
+    EventId,
+    AttemptId,
+    EventSourceId,
 );
 
 macro_rules! agent_ids {

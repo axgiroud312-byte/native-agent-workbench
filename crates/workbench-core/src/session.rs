@@ -126,6 +126,9 @@ pub struct Run {
     pub started_at: Option<Timestamp>,
     pub state: ExecutionState,
     pub recovery: RunRecoveryState,
+    /// Frozen at dispatch; later session configuration does not rewrite this run.
+    #[serde(default)]
+    pub dispatched_configuration: Option<crate::EffectiveConfiguration>,
 }
 
 impl Run {
@@ -138,6 +141,7 @@ impl Run {
             started_at: None,
             state: ExecutionState::Starting,
             recovery: RunRecoveryState::NotAttempted,
+            dispatched_configuration: None,
         }
     }
 }
