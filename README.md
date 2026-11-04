@@ -7,6 +7,7 @@ Windows 优先的开源原生 Agent 工作台，使用 Rust、GPUI Kit 和 ACP�
 目标是一个不透明炭灰色、弱外框和弱顶栏的双栏窗口：左侧组织项目与会话，右侧完成输入、流式对话、工具执行、审批和结果查看。多个会话可在同一项目目录并行工作；关闭窗口后收进托盘继续运行。
 
 - [MVP 开发规范与验收要求](docs/specs/native-agent-workbench-mvp.md)
+- [可执行任务与依赖顺序](docs/task-plan.md)
 - [贡献与验证约定](CONTRIBUTING.md)
 - [Agent 开发约定](AGENTS.md)
 - [MIT 许可证](LICENSE)
