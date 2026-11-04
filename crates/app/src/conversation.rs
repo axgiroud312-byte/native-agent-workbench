@@ -17,6 +17,154 @@ use workbench_core::{
     MessageSnapshot, MessageState, SessionSnapshot, ToolSnapshot, ToolState,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationRowId {
+    Message(workbench_core::MessageId),
+    Tool(workbench_core::ToolCallId),
+}
+
+#[derive(Clone)]
+pub(crate) enum ConversationRow {
+    Message(Entity<MessageView>),
+    Tool(std::sync::Arc<ToolSnapshot>),
+}
+
+#[derive(Default)]
+struct MessageContext {
+    attachments: Vec<workbench_core::Attachment>,
+    plans: Vec<workbench_core::Plan>,
+    changes: Vec<workbench_core::FileChange>,
+    tool_names: Vec<(workbench_core::ToolCallId, String)>,
+}
+
+pub(crate) struct MessageView {
+    message: MessageSnapshot,
+    context: std::sync::Arc<MessageContext>,
+}
+impl Render for MessageView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_message_row(&self.message, &self.context, cx).into_any_element()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ConversationCache {
+    order: Vec<ConversationRowId>,
+    messages: std::collections::BTreeMap<workbench_core::MessageId, Entity<MessageView>>,
+    tools: std::collections::BTreeMap<workbench_core::ToolCallId, std::sync::Arc<ToolSnapshot>>,
+    context: std::sync::Arc<MessageContext>,
+}
+impl ConversationCache {
+    pub(crate) fn rows(&self) -> Vec<ConversationRow> {
+        self.order
+            .iter()
+            .filter_map(|id| match id {
+                ConversationRowId::Message(id) => {
+                    self.messages.get(id).cloned().map(ConversationRow::Message)
+                }
+                ConversationRowId::Tool(id) => {
+                    self.tools.get(id).cloned().map(ConversationRow::Tool)
+                }
+            })
+            .collect()
+    }
+    pub(crate) fn sync(
+        &mut self,
+        session: &SessionSnapshot,
+        scroller: &Entity<gpui_kit::component::message_scroller::MessageScrollerState>,
+        cx: &mut Context<Workbench>,
+    ) {
+        let names: Vec<_> = session
+            .tools
+            .iter()
+            .map(|tool| (tool.id, tool.name.clone()))
+            .collect();
+        let context_changed = self.context.attachments != session.attachments
+            || self.context.plans != session.plans
+            || self.context.changes != session.changes
+            || self.context.tool_names != names;
+        if context_changed {
+            self.context = std::sync::Arc::new(MessageContext {
+                attachments: session.attachments.clone(),
+                plans: session.plans.clone(),
+                changes: session.changes.clone(),
+                tool_names: names,
+            });
+        }
+        let next: Vec<_> = session
+            .messages
+            .iter()
+            .map(|m| ConversationRowId::Message(m.id))
+            .chain(session.tools.iter().map(|t| ConversationRowId::Tool(t.id)))
+            .collect();
+        let prefix = self
+            .order
+            .iter()
+            .zip(&next)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let suffix = self.order[prefix..]
+            .iter()
+            .rev()
+            .zip(next[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if prefix != self.order.len() || prefix != next.len() {
+            let old_end = self.order.len() - suffix;
+            let count = next.len() - prefix - suffix;
+            scroller.update(cx, |scroller, cx| {
+                scroller.splice(prefix..old_end, count, cx);
+            });
+        }
+        let mut changed = Vec::new();
+        for (ix, message) in session.messages.iter().enumerate() {
+            if let Some(view) = self.messages.get(&message.id) {
+                let has_references = message
+                    .blocks
+                    .iter()
+                    .any(|b| !matches!(b.content, ContentPresentation::Text { .. }));
+                if view.read(cx).message != *message || context_changed && has_references {
+                    let context = self.context.clone();
+                    view.update(cx, |view, cx| {
+                        view.message = message.clone();
+                        view.context = context;
+                        cx.notify();
+                    });
+                    changed.push(ix);
+                }
+            } else {
+                let context = self.context.clone();
+                let message = message.clone();
+                self.messages
+                    .insert(message.id, cx.new(|_| MessageView { message, context }));
+            }
+        }
+        for (ix, tool) in session.tools.iter().enumerate() {
+            if self
+                .tools
+                .get(&tool.id)
+                .is_none_or(|old| old.as_ref() != tool)
+            {
+                self.tools
+                    .insert(tool.id, std::sync::Arc::new(tool.clone()));
+                changed.push(session.messages.len() + ix);
+            }
+        }
+        self.messages
+            .retain(|id, _| session.messages.iter().any(|m| m.id == *id));
+        self.tools
+            .retain(|id, _| session.tools.iter().any(|t| t.id == *id));
+        self.order = next;
+        if !changed.is_empty() {
+            scroller.update(cx, |scroller, cx| {
+                for ix in changed {
+                    scroller.remeasure_items(ix..ix + 1, cx);
+                }
+            });
+        }
+    }
+}
+
 impl Workbench {
     pub(crate) fn render_workspace_header(
         &self,
@@ -60,7 +208,7 @@ impl Workbench {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Some(session) = self.host.active_session().cloned() else {
+        let Some(session) = self.host.active_session() else {
             let has_directory = self.host.selected_project().is_some();
             return v_flex()
                 .id("conversation-empty")
@@ -149,9 +297,11 @@ impl Workbench {
             .read(cx)
             .draft_error(session.record.id())
             .map(str::to_owned);
-        let messages = session.messages.clone();
-        let tools = session.tools.clone();
-        let attachments = session.attachments.clone();
+        let rows = self
+            .conversations
+            .get(&session.record.id())
+            .map(ConversationCache::rows)
+            .unwrap_or_default();
         let expanded = self.host.preferences().expanded_tools.clone();
         let entity = cx.entity();
         v_flex()
@@ -185,21 +335,18 @@ impl Workbench {
                     MessageScroller::new(
                         ElementId::Name(format!("session-scroller:{}", session.record.id()).into()),
                         self.message_scroller.clone(),
-                        move |ix, _, cx| {
-                            if let Some(message) = messages.get(ix) {
-                                render_message_row(message, &attachments, cx).into_any_element()
-                            } else if let Some(tool) = tools.get(ix.saturating_sub(messages.len()))
-                            {
-                                render_tool_row(
-                                    tool,
-                                    expanded.contains(&tool.id),
-                                    entity.clone(),
-                                    cx,
-                                )
-                                .into_any_element()
-                            } else {
-                                div().into_any_element()
+                        move |ix, _, cx| match rows.get(ix) {
+                            Some(ConversationRow::Message(message)) => {
+                                message.clone().into_any_element()
                             }
+                            Some(ConversationRow::Tool(tool)) => render_tool_row(
+                                tool,
+                                expanded.contains(&tool.id),
+                                entity.clone(),
+                                cx,
+                            )
+                            .into_any_element(),
+                            None => div().into_any_element(),
                         },
                     )
                     .with_jump_button_label("回到最新")
@@ -252,7 +399,7 @@ fn workspace_header_status(
 
 fn render_message_row(
     message: &MessageSnapshot,
-    attachments: &[workbench_core::Attachment],
+    context: &MessageContext,
     cx: &App,
 ) -> impl IntoElement {
     let is_user = message.role == MessageRole::User;
@@ -278,7 +425,7 @@ fn render_message_row(
                             message
                                 .blocks
                                 .iter()
-                                .map(|block| render_block(block, attachments, is_streaming, cx)),
+                                .map(|block| render_block(block, context, is_streaming, cx)),
                         ),
                 )
             })
@@ -288,7 +435,7 @@ fn render_message_row(
                         message
                             .blocks
                             .iter()
-                            .map(|block| render_block(block, attachments, is_streaming, cx)),
+                            .map(|block| render_block(block, context, is_streaming, cx)),
                     )
                     .when_some(
                         match &message.state {
@@ -310,7 +457,7 @@ fn render_message_row(
 
 fn render_block(
     block: &BlockSnapshot,
-    attachments: &[workbench_core::Attachment],
+    context: &MessageContext,
     is_streaming: bool,
     cx: &App,
 ) -> AnyElement {
@@ -323,7 +470,8 @@ fn render_block(
         .stream_fade(is_streaming)
         .into_any_element(),
         ContentPresentation::Image { attachment_id, alt } => {
-            let name = attachments
+            let name = context
+                .attachments
                 .iter()
                 .find(|a| a.id == *attachment_id)
                 .map(|a| a.name.clone())
@@ -344,7 +492,8 @@ fn render_block(
                 .into_any_element()
         }
         ContentPresentation::Attachment { attachment_id } => {
-            let name = attachments
+            let name = context
+                .attachments
                 .iter()
                 .find(|a| a.id == *attachment_id)
                 .map(|a| a.name.clone())
@@ -408,7 +557,60 @@ fn render_block(
             .text_color(theme::text_muted(cx))
             .child(format!("暂不支持呈现该内容块类型：{type_name}"))
             .into_any_element(),
-        _ => div().into_any_element(),
+        ContentPresentation::ToolCall { tool_call_id } => div()
+            .text_sm()
+            .text_color(theme::text_secondary(cx))
+            .child(
+                context
+                    .tool_names
+                    .iter()
+                    .find(|(id, _)| id == tool_call_id)
+                    .map(|(_, name)| format!("工具：{name}"))
+                    .unwrap_or_else(|| "工具记录暂不可用".into()),
+            )
+            .into_any_element(),
+        ContentPresentation::Plan { plan_id } => {
+            let Some(plan) = context.plans.iter().find(|plan| plan.id == *plan_id) else {
+                return div().child("计划记录暂不可用").into_any_element();
+            };
+            v_flex()
+                .gap_1()
+                .children(plan.steps.iter().map(|step| {
+                    let state = match step.state {
+                        workbench_core::PlanStepState::Pending => "待办",
+                        workbench_core::PlanStepState::InProgress => "进行中",
+                        workbench_core::PlanStepState::Completed => "完成",
+                        workbench_core::PlanStepState::Cancelled => "已取消",
+                    };
+                    div().text_sm().child(format!("{state} · {}", step.text))
+                }))
+                .into_any_element()
+        }
+        ContentPresentation::FileChange { file_change_id } => {
+            let Some(change) = context
+                .changes
+                .iter()
+                .find(|change| change.id == *file_change_id)
+            else {
+                return div().child("文件变更记录暂不可用").into_any_element();
+            };
+            let detail = match &change.diff {
+                workbench_core::FileDiff::Unified { text } => text.clone(),
+                workbench_core::FileDiff::Binary => "二进制文件变更".into(),
+                workbench_core::FileDiff::Unavailable { reason } => reason.clone(),
+            };
+            v_flex()
+                .gap_2()
+                .child(change.path.display().to_string())
+                .child(
+                    TextView::markdown(
+                        ElementId::Name(format!("file-change-raw:{}", change.id).into()),
+                        format!("~~~~diff\n{detail}\n~~~~"),
+                    )
+                    .selectable(true),
+                )
+                .into_any_element()
+        }
     }
 }
 

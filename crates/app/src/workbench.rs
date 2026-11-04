@@ -1,5 +1,6 @@
 use crate::{
     application::{ApplicationOwner, ApplicationState, PreferenceEdit},
+    conversation::ConversationCache,
     fixture::FixturePreset,
     host::{WorkbenchHost, draft_plain_text},
     settings::SettingsView,
@@ -24,6 +25,8 @@ actions!(
         OpenProject,
         OpenSettings,
         NewSession,
+        SubmitDraft,
+        StopRun,
         FocusComposer,
         FocusNavigation,
         Quit
@@ -42,7 +45,10 @@ pub struct Workbench {
     pub(crate) composer_input: Entity<TextareaState>,
     pub(crate) message_scroller: Entity<MessageScrollerState>,
     scrollers: BTreeMap<SessionId, Entity<MessageScrollerState>>,
+    pub(crate) conversations: BTreeMap<SessionId, ConversationCache>,
     editor_session: Option<SessionId>,
+    editor_model_text: String,
+    pub(crate) enter_suppressed: bool,
     settings: Option<Entity<SettingsView>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -57,6 +63,7 @@ impl Workbench {
         let composer_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("输入草稿…")
+                .submit_on_enter(true)
                 .auto_grow(2, 4)
         });
         let message_scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
@@ -72,7 +79,10 @@ impl Workbench {
             composer_input,
             message_scroller,
             scrollers: BTreeMap::new(),
+            conversations: BTreeMap::new(),
             editor_session: None,
+            editor_model_text: String::new(),
+            enter_suppressed: false,
             settings: None,
             _subscriptions: Vec::new(),
         };
@@ -131,9 +141,23 @@ impl Workbench {
                 cx.notify();
             },
         ));
-        this._subscriptions.push(
-            cx.subscribe(&this.composer_input, |this, input, event, cx| {
+        this._subscriptions.push(cx.subscribe_in(
+            &this.composer_input,
+            window,
+            |this, input, event, window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = event {
+                    let suppressed = std::mem::take(&mut this.enter_suppressed);
+                    if !shift && !suppressed {
+                        this.submit_draft(&SubmitDraft, window, cx);
+                    }
+                    return;
+                }
                 if let InputEvent::Change = event {
+                    if input.update(cx, |input, cx| {
+                        input.marked_text_range(window, cx).is_some()
+                    }) {
+                        return;
+                    }
                     let Some(id) = this.editor_session else {
                         return;
                     };
@@ -160,8 +184,8 @@ impl Workbench {
                     }
                     cx.notify();
                 }
-            }),
-        );
+            },
+        ));
         this.sync_application(window, cx);
         window.focus(&this.focus, cx);
         this
@@ -255,21 +279,17 @@ impl Workbench {
                 != snapshot.preferences.selected_project_id;
         let zoom_changed =
             self.host.preferences().zoom_percent != snapshot.preferences.zoom_percent;
-        let old_draft = self
-            .host
-            .active_session()
-            .map(|s| draft_plain_text(&s.draft));
-        let content_changed = self.host.active_session().map(|s| (&s.messages, &s.tools))
-            != snapshot
-                .active_session
-                .as_ref()
-                .map(|s| (&s.messages, &s.tools));
-        self.host.accept_confirmed(
-            snapshot.workbench.clone(),
-            snapshot.active_session.clone(),
-            snapshot.preferences.clone(),
-        );
+        let tools_expanded =
+            self.host.preferences().expanded_tools != snapshot.preferences.expanded_tools;
+        self.host.accept_confirmed(snapshot.clone());
         self.scrollers.retain(|id, _| {
+            snapshot
+                .workbench
+                .sessions
+                .iter()
+                .any(|session| session.id == *id)
+        });
+        self.conversations.retain(|id, _| {
             snapshot
                 .workbench
                 .sessions
@@ -296,15 +316,24 @@ impl Workbench {
                 .map(str::to_owned)
                 .unwrap_or_else(|| draft_plain_text(&session.draft));
             let value = self.composer_input.read(cx).value().to_string();
-            if value != text && old_draft.as_deref() == Some(value.as_str()) {
-                self.composer_input
-                    .update(cx, |input, cx| input.set_value(text, window, cx));
+            let composing = self.composer_input.update(cx, |input, cx| {
+                input.marked_text_range(window, cx).is_some()
+            });
+            if !composing && (value == text || value == self.editor_model_text) {
+                self.editor_model_text = text.clone();
+                if value != text {
+                    self.composer_input
+                        .update(cx, |input, cx| input.set_value(text, window, cx));
+                }
             }
-            self.update_scroller_count(cx);
+            self.sync_conversation(cx);
         }
-        if content_changed {
+        if tools_expanded {
             self.message_scroller.update(cx, |s, cx| s.remeasure(cx));
         }
+        let running = self.active_run().is_some();
+        self.composer_input
+            .update(cx, |input, cx| input.set_submit_on_enter(!running, cx));
         if zoom_changed {
             for scroller in self.scrollers.values() {
                 scroller.update(cx, |s, cx| s.remeasure(cx));
@@ -327,32 +356,27 @@ impl Workbench {
                     .map(|s| draft_plain_text(&s.draft))
             })
             .unwrap_or_default();
+        self.editor_model_text = text.clone();
         self.composer_input
             .update(cx, |input, cx| input.set_value(text, window, cx));
         if let Some(session) = self.host.active_session() {
             let id = session.record.id();
-            let count = session.messages.len() + session.tools.len();
             self.message_scroller = self
                 .scrollers
                 .entry(id)
-                .or_insert_with(|| cx.new(|cx| MessageScrollerState::new(count, cx)))
+                .or_insert_with(|| cx.new(|cx| MessageScrollerState::new(0, cx)))
                 .clone();
-            self.update_scroller_count(cx);
+            self.sync_conversation(cx);
         }
         cx.notify();
     }
 
-    fn update_scroller_count(&self, cx: &mut Context<Self>) {
+    fn sync_conversation(&mut self, cx: &mut Context<Self>) {
         if let Some(session) = self.host.active_session() {
-            let count = session.messages.len() + session.tools.len();
-            self.message_scroller.update(cx, |scroller, cx| {
-                let previous = scroller.item_count();
-                if count > previous {
-                    scroller.append(count - previous, cx);
-                } else if count < previous {
-                    scroller.splice(count..previous, 0, cx);
-                }
-            });
+            self.conversations
+                .entry(session.record.id())
+                .or_default()
+                .sync(session, &self.message_scroller, cx);
         }
     }
 
@@ -561,6 +585,8 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::new_session))
+            .on_action(cx.listener(Self::submit_draft))
+            .on_action(cx.listener(Self::stop_run))
             .on_action(cx.listener(Self::focus_composer))
             .on_action(cx.listener(Self::focus_navigation))
             .bg(theme::workspace_bg(cx))

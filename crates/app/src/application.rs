@@ -1,10 +1,12 @@
-use crate::{host::draft_command, theme};
+mod submission;
+use crate::{host::edited_draft_command, theme};
 use gpui_kit::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::Arc,
 };
+use submission::PendingSend;
 use workbench_core::*;
 use workbench_service::{ApplicationService, RemovalTarget, ServiceOptions, ServiceSnapshot};
 
@@ -17,7 +19,11 @@ pub(crate) struct ApplicationState {
     options: ServiceOptions,
     subscription: Option<Task<()>>,
     preference_edits: Vec<PreferenceEdit>,
-    draft_edits: BTreeMap<SessionId, String>,
+    draft_edits: BTreeMap<SessionId, DraftEdit>,
+    edit_clock: u64,
+    pending_sends: BTreeMap<SessionId, PendingSend>,
+    send_errors: BTreeMap<SessionId, String>,
+    stopping_requests: BTreeMap<SessionId, RunId>,
     drafts_in_flight: BTreeSet<SessionId>,
     draft_failures: BTreeMap<SessionId, String>,
     quit_requested: bool,
@@ -26,6 +32,12 @@ pub(crate) struct ApplicationState {
     navigation_requests: BTreeSet<RemovalTarget>,
     pub(crate) relocating_projects: BTreeSet<ProjectId>,
     pub(crate) connection_requests: BTreeSet<SessionId>,
+}
+
+#[derive(Clone)]
+struct DraftEdit {
+    text: String,
+    version: u64,
 }
 
 /// One application owner, independent of settings dialogs and selected sessions.
@@ -85,6 +97,10 @@ impl ApplicationState {
             subscription: None,
             preference_edits: Vec::new(),
             draft_edits: BTreeMap::new(),
+            edit_clock: 0,
+            pending_sends: BTreeMap::new(),
+            send_errors: BTreeMap::new(),
+            stopping_requests: BTreeMap::new(),
             drafts_in_flight: BTreeSet::new(),
             draft_failures: BTreeMap::new(),
             quit_requested: false,
@@ -176,6 +192,7 @@ impl ApplicationState {
         let sessions: BTreeSet<_> = snapshot.workbench.sessions.iter().map(|s| s.id).collect();
         self.draft_edits.retain(|id, _| sessions.contains(id));
         self.draft_failures.retain(|id, _| sessions.contains(id));
+        self.send_errors.retain(|id, _| sessions.contains(id));
         self.navigation_errors.retain(|target, _| match target {
             RemovalTarget::Session(id) => sessions.contains(id),
             RemovalTarget::Project(id) => snapshot.workbench.projects.iter().any(|p| p.id == *id),
@@ -251,7 +268,7 @@ impl ApplicationState {
     }
 
     pub(crate) fn draft_text(&self, id: SessionId) -> Option<&str> {
-        self.draft_edits.get(&id).map(String::as_str)
+        self.draft_edits.get(&id).map(|edit| edit.text.as_str())
     }
 
     pub(crate) fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
@@ -414,16 +431,27 @@ impl ApplicationState {
         if self.quit_requested {
             return;
         }
-        self.draft_edits.insert(id, text);
+        if self.record_edit(id, text).is_none() {
+            cx.notify();
+            return;
+        }
         self.draft_failures.remove(&id);
         self.flush_draft(id, cx);
+        cx.notify();
     }
 
     fn flush_draft(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        if self.drafts_in_flight.contains(&id) {
+            return;
+        }
+        if self.pending_sends.contains_key(&id) {
+            self.begin_send(id, cx);
+            return;
+        }
         if self.drafts_in_flight.contains(&id) || self.draft_failures.contains_key(&id) {
             return;
         }
-        let (Some(handle), Some(text)) = (self.handle.clone(), self.draft_edits.get(&id).cloned())
+        let (Some(handle), Some(edit)) = (self.handle.clone(), self.draft_edits.get(&id).cloned())
         else {
             return;
         };
@@ -438,7 +466,14 @@ impl ApplicationState {
                         RetryAdvice::AfterCorrection,
                     )
                 })?;
-                if let Some(command) = draft_command(&session, text.clone())? {
+                if reply.session_id != id || session.record.id() != id {
+                    return Err(BusinessError::new(
+                        ErrorKind::StaleIdentity,
+                        "草稿查询归属不匹配",
+                        RetryAdvice::Never,
+                    ));
+                }
+                if let Some(command) = edited_draft_command(&session, edit.text.clone())? {
                     let receipt = handle.execute(command).await?;
                     if let CommandStatus::Rejected { error } = receipt.result {
                         return Err(error);
@@ -452,12 +487,21 @@ impl ApplicationState {
                 state.publish(handle.snapshot(), cx);
                 match result {
                     Ok(()) => {
-                        if state.draft_edits.get(&id) == Some(&text) {
+                        if state
+                            .draft_edits
+                            .get(&id)
+                            .is_some_and(|current| current.version == edit.version)
+                        {
                             state.draft_edits.remove(&id);
                         }
                         state.flush_draft(id, cx);
                     }
                     Err(error) => {
+                        if state.pending_sends.remove(&id).is_some() {
+                            state
+                                .send_errors
+                                .insert(id, format!("发送前保存失败：{}", error.message));
+                        }
                         if state.confirmed.as_ref().is_some_and(|frame| {
                             frame.workbench.sessions.iter().any(|s| s.id == id)
                         }) {
@@ -485,6 +529,7 @@ impl ApplicationState {
             || self.starting
             || self.preferences_pending
             || !self.drafts_in_flight.is_empty()
+            || !self.pending_sends.is_empty()
         {
             return;
         }

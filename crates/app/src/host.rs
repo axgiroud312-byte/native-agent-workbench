@@ -1,11 +1,15 @@
 use crate::fixture::{FixturePreset, build_fixture};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use workbench_core::{
     ApplyDisposition, ApplyMode, BusinessError, Command, CommandEnvelope, CommandId, ComposerDraft,
     ErrorKind, InputPart, JournalEntry, JournalRecord, ProjectId, RetryAdvice, Scope, SessionId,
     SessionSnapshot, Timestamp, ToolCallId, WorkbenchSnapshot, WorkbenchState,
     WorkspacePreferences, reduce,
 };
+use workbench_service::ServiceSnapshot;
 
 /// Core commands and view preferences remain separate at the future service seam.
 pub enum UiIntent {
@@ -20,6 +24,7 @@ struct FixtureSource {
 /// Production receives committed snapshots from the application service. Only the
 /// explicit fixture source runs a local reducer; the two sources never share storage.
 pub struct WorkbenchHost {
+    live: Option<Arc<ServiceSnapshot>>,
     snapshot: WorkbenchSnapshot,
     active_session: Option<SessionSnapshot>,
     preferences: WorkspacePreferences,
@@ -29,6 +34,7 @@ pub struct WorkbenchHost {
 impl WorkbenchHost {
     pub fn new(preset: Option<FixturePreset>) -> Self {
         let mut host = Self {
+            live: None,
             snapshot: WorkbenchState::new().snapshot(),
             active_session: None,
             preferences: WorkspacePreferences::default(),
@@ -44,13 +50,22 @@ impl WorkbenchHost {
         host
     }
     pub fn snapshot(&self) -> &WorkbenchSnapshot {
-        &self.snapshot
+        self.live
+            .as_ref()
+            .map(|frame| &frame.workbench)
+            .unwrap_or(&self.snapshot)
     }
     pub fn active_session(&self) -> Option<&SessionSnapshot> {
-        self.active_session.as_ref()
+        match &self.live {
+            Some(frame) => frame.active_session.as_ref(),
+            None => self.active_session.as_ref(),
+        }
     }
     pub fn preferences(&self) -> &WorkspacePreferences {
-        &self.preferences
+        self.live
+            .as_ref()
+            .map(|frame| &frame.preferences)
+            .unwrap_or(&self.preferences)
     }
     pub fn active_preset(&self) -> Option<FixturePreset> {
         self.fixture.as_ref().map(|f| f.preset)
@@ -58,29 +73,22 @@ impl WorkbenchHost {
     pub fn is_fixture(&self) -> bool {
         self.fixture.is_some()
     }
-    pub fn accept_confirmed(
-        &mut self,
-        snapshot: WorkbenchSnapshot,
-        active_session: Option<SessionSnapshot>,
-        preferences: WorkspacePreferences,
-    ) {
+    pub fn accept_confirmed(&mut self, frame: Arc<ServiceSnapshot>) {
         if self.fixture.is_some() {
             return;
         }
-        self.snapshot = snapshot;
-        self.active_session = active_session;
-        self.preferences = preferences;
+        self.live = Some(frame);
         self.error = None;
     }
     pub fn last_error(&self) -> Option<&BusinessError> {
         self.error.as_ref()
     }
     pub fn selected_project(&self) -> Option<&workbench_core::Project> {
-        let id = self.preferences.selected_project_id?;
-        self.snapshot.projects.iter().find(|p| p.id == id)
+        let id = self.preferences().selected_project_id?;
+        self.snapshot().projects.iter().find(|p| p.id == id)
     }
     pub fn agent_name(&self, id: workbench_core::AgentId) -> String {
-        self.snapshot
+        self.snapshot()
             .agents
             .iter()
             .find(|a| a.id == id)
@@ -212,7 +220,22 @@ pub fn draft_command(
     session: &SessionSnapshot,
     text: String,
 ) -> Result<Option<CommandEnvelope>, BusinessError> {
-    if draft_plain_text(&session.draft) == text {
+    draft_command_inner(session, text, false)
+}
+
+pub(crate) fn edited_draft_command(
+    session: &SessionSnapshot,
+    text: String,
+) -> Result<Option<CommandEnvelope>, BusinessError> {
+    draft_command_inner(session, text, true)
+}
+
+fn draft_command_inner(
+    session: &SessionSnapshot,
+    text: String,
+    force_revision: bool,
+) -> Result<Option<CommandEnvelope>, BusinessError> {
+    if !force_revision && draft_plain_text(&session.draft) == text {
         return Ok(None);
     }
     let mut draft = session.draft.clone();

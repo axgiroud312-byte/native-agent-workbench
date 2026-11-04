@@ -144,6 +144,13 @@ pub(crate) fn valid_input(
     validate::input(s, content, requested).is_ok()
 }
 
+pub(crate) fn valid_input_configuration(
+    s: &SessionState,
+    requested: &RequestedConfiguration,
+) -> bool {
+    validate::input_configuration(s, requested).is_ok()
+}
+
 fn session_mut(
     state: &mut WorkbenchState,
     scope: Scope,

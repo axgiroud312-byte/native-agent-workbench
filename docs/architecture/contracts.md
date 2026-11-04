@@ -71,6 +71,8 @@ Consumed 同步提交 Accepted（保留原派发代次）、原尝试和所属�
 
 can_dispatch_queue 只在前轮结束、无 prompt in-flight/未知提交/待答、队列 Ready、头部 Waiting、配置/输入重新有效时成立。app 分配身份后通过 Submit 再验，不能依据旧快照直接调 SDK。Editing 阻止派发，Dispatching 不能编辑，不同会话不互相等待。
 
+can_prepare_prompt 只表示可接受“先保存本地输入，再验证提交”的 UI 意图：复用 fresh_prompt、未决提交、队列头部与 input 的同一确认配置校验，不读取旧 draft.content。空的已保存草稿可以为 true，can_start_prompt 仍为 false。UI 保存最新内容后必须重取同会话快照，使用 can_start_prompt 与原 Submit reducer 检查真实内容/附件/来源/身份；该字段不是发送资格、远端接受或第二套队列规则。旧 SessionSnapshot JSON 缺字段保守默认 false。
+
 Stop 立即暂停队列、失效请求，再交 responder 取消和 session/cancel；确认取消另靠原 prompt 返回或权威结束事实。仅 EndOfTurn 可按原 Ready 状态继续；限额、refusal、typed failure 必须映射原因并暂停，不能一律显示成功。停止、失败、断连和重启保留未发内容。**空队列下，前轮确认结束后的用户显式新 Submit 可以发送，不要求 ResumeQueue，也不顺便恢复旧队列。** 有旧等待条目时仍按顺序处理，不能暗中越过。
 
 ## 请求交付、关闭与恢复

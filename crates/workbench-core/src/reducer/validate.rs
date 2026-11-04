@@ -80,11 +80,11 @@ pub(super) fn configuration(
     Ok(())
 }
 
-pub(super) fn input(
-    session: &SessionState,
-    content: &[InputPart],
+/// Shared confirmed configuration gate, independent of whether local input is saved yet.
+pub(super) fn input_configuration<'a>(
+    session: &'a SessionState,
     requested: &RequestedConfiguration,
-) -> Result<(), BusinessError> {
+) -> Result<&'a AgentCapabilities, BusinessError> {
     let c = ready(session)?;
     configuration(c, requested)?;
     if session.record.configuration.pending.is_some() || session.next_configuration.is_some() {
@@ -125,6 +125,15 @@ pub(super) fn input(
             "input configuration intent must be confirmed before sending",
         ));
     }
+    Ok(c)
+}
+
+pub(super) fn input(
+    session: &SessionState,
+    content: &[InputPart],
+    requested: &RequestedConfiguration,
+) -> Result<(), BusinessError> {
+    let c = input_configuration(session, requested)?;
     if content.is_empty() {
         return Err(BusinessError::invalid("input is empty"));
     }

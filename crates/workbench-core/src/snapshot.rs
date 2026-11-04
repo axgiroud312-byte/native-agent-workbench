@@ -156,6 +156,10 @@ pub struct SessionSnapshot {
     pub queue: InputQueue,
     pub submissions: Vec<InputSubmission>,
     pub attempts: Vec<TransportAttempt>,
+    /// May accept a save-then-validate prompt intent; never permission to send or remote ACK.
+    /// The unsaved/local input must still be persisted and checked by can_start_prompt/Submit.
+    #[serde(default)]
+    pub can_prepare_prompt: bool,
     pub can_start_prompt: bool,
     pub can_steer: bool,
     pub can_dispatch_queue: bool,
@@ -214,6 +218,10 @@ impl WorkbenchState {
                     && crate::reducer::valid_input(s, &q.content, &q.configuration)
             });
         let can_steer = crate::reducer::is_steering_eligible(s);
+        let can_prepare_prompt = base_ready
+            && !unsettled
+            && head.is_none()
+            && crate::reducer::valid_input_configuration(s, &s.draft.configuration);
         Some(SessionSnapshot {
             record: s.record.clone(),
             resources_released: s.resources_released,
@@ -278,9 +286,8 @@ impl WorkbenchState {
             queue: s.queue.clone(),
             submissions: s.submissions.values().cloned().collect(),
             attempts: s.attempts.values().cloned().collect(),
-            can_start_prompt: base_ready
-                && !unsettled
-                && head.is_none()
+            can_prepare_prompt,
+            can_start_prompt: can_prepare_prompt
                 && crate::reducer::valid_input(s, &s.draft.content, &s.draft.configuration),
             can_steer,
             can_dispatch_queue,

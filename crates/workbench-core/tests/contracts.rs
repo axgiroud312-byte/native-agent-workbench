@@ -450,6 +450,7 @@ fn cancelled_requests_stay_invalid_and_manual_send_does_not_resume_the_queue() {
         },
     );
     assert!(!s.snapshot(0).can_dispatch_queue);
+    assert!(!s.snapshot(0).can_prepare_prompt); // Waiting queue still owns dispatch priority.
     // An empty paused queue must not block the user's explicit new work after confirmed stop.
     s.command(s.scope(1).with_request(RequestId::new()), Command::Stop);
     s.receipt(
@@ -458,11 +459,48 @@ fn cancelled_requests_stay_invalid_and_manual_send_does_not_resume_the_queue() {
             end: RunEnd::Cancelled,
         },
     );
+    let ready = s.snapshot(1);
+    assert!(ready.draft.content.is_empty());
+    assert!(ready.can_prepare_prompt); // Local text can be saved after the user presses Enter.
+    assert!(!ready.can_start_prompt); // Empty durable draft still cannot be sent.
+    let mut legacy = serde_json::to_value(&ready).unwrap();
+    legacy.as_object_mut().unwrap().remove("can_prepare_prompt");
+    assert!(
+        !serde_json::from_value::<SessionSnapshot>(legacy)
+            .unwrap()
+            .can_prepare_prompt
+    );
+    let mut pending = s.clone();
+    pending.command(
+        Scope::session(s.fixture.sessions[1], ConnectionEpoch::new(1))
+            .with_request(RequestId::new()),
+        Command::Configure {
+            requested: RequestedConfiguration::default(),
+            capability_revision: 1,
+        },
+    );
+    assert!(!pending.snapshot(1).can_prepare_prompt);
+    let mut closing = s.clone();
+    closing.command(
+        Scope::session(s.fixture.sessions[1], ConnectionEpoch::new(1)),
+        Command::CloseSession,
+    );
+    assert!(!closing.snapshot(1).can_prepare_prompt);
     let new_run = RunId::new();
     let mut draft = ComposerDraft::new(s.fixture.sessions[1], Timestamp::new(3000));
+    let expected_revision = s.snapshot(1).draft.revision;
+    draft.revision = expected_revision + 1;
     draft.content.push(InputPart::Text {
         text: "停止后再发".into(),
     });
+    s.command(
+        Scope::session(s.fixture.sessions[1], ConnectionEpoch::new(1)),
+        Command::SaveDraft {
+            draft: draft.clone(),
+            expected_revision,
+        },
+    );
+    assert!(s.snapshot(1).can_start_prompt);
     let submission = InputSubmission::from_draft(
         SubmissionId::new(),
         &draft,
@@ -479,6 +517,7 @@ fn cancelled_requests_stay_invalid_and_manual_send_does_not_resume_the_queue() {
         },
     );
     assert_eq!(t.disposition(), &ApplyDisposition::Applied);
+    assert!(!s.snapshot(1).can_prepare_prompt); // Submitted input is unsettled/in flight.
     assert!(matches!(
         s.snapshot(1).queue.dispatch,
         QueueDispatchState::Paused { .. }
