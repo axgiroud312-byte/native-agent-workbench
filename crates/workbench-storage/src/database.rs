@@ -722,6 +722,13 @@ fn save_state(connection: &Connection, state: &WorkbenchState) -> Result<(), Bus
         {
             preferences.record.selected_session_id = None;
         }
+        if let Some(session) = preferences
+            .record
+            .selected_session_id
+            .and_then(|id| snapshot.sessions.iter().find(|s| s.id == id))
+        {
+            preferences.record.selected_project_id = Some(session.project_id);
+        }
         preferences
             .record
             .expanded_projects

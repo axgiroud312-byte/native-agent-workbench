@@ -23,6 +23,7 @@ actions!(
     [
         OpenProject,
         OpenSettings,
+        NewSession,
         FocusComposer,
         FocusNavigation,
         Quit
@@ -189,6 +190,16 @@ impl Workbench {
             .host
             .preferences()
             .selected_session_id
+            .filter(|id| {
+                self.host.snapshot().sessions.iter().any(|session| {
+                    session.id == *id
+                        && self
+                            .host
+                            .preferences()
+                            .expanded_projects
+                            .contains(&session.project_id)
+                })
+            })
             .map(|id| format!("session:{id}"))
             .or_else(|| {
                 self.host
@@ -228,6 +239,16 @@ impl Workbench {
                     .map(|s| (&s.id, &s.project_id, &s.title)));
         let expansion_changed =
             self.host.preferences().expanded_projects != snapshot.preferences.expanded_projects;
+        let expansion_already_visible = snapshot.workbench.projects.iter().all(|project| {
+            let tree = self.session_tree.read(cx);
+            let key: SharedString = format!("project:{}", project.id).into();
+            tree.index_of(&key)
+                .and_then(|ix| tree.entry(ix))
+                .is_some_and(|entry| {
+                    entry.is_expanded()
+                        == snapshot.preferences.expanded_projects.contains(&project.id)
+                })
+        });
         let selection_changed = self.host.preferences().selected_session_id
             != snapshot.preferences.selected_session_id
             || self.host.preferences().selected_project_id
@@ -248,12 +269,20 @@ impl Workbench {
             snapshot.active_session.clone(),
             snapshot.preferences.clone(),
         );
-        if structure_changed || expansion_changed {
+        self.scrollers.retain(|id, _| {
+            snapshot
+                .workbench
+                .sessions
+                .iter()
+                .any(|session| session.id == *id)
+        });
+        let rebuild_tree = structure_changed || expansion_changed && !expansion_already_visible;
+        if rebuild_tree {
             let items = Self::tree_items(&self.host);
             self.session_tree
                 .update(cx, |tree, cx| tree.set_items(items, cx));
         }
-        if structure_changed || expansion_changed || selection_changed {
+        if rebuild_tree || selection_changed {
             self.select_tree_item(cx);
         }
         let new_id = self.host.active_session().map(|s| s.record.id());
@@ -338,9 +367,8 @@ impl Workbench {
             self.sync_session(window, cx);
             self.select_tree_item(cx);
         } else {
-            self.application.update(cx, |app, cx| {
-                app.save_preference(PreferenceEdit::Project(id), cx)
-            });
+            self.application
+                .update(cx, |app, cx| app.select_project(Some(id), cx));
         }
         cx.notify();
     }
@@ -402,11 +430,14 @@ impl Workbench {
     }
     pub(crate) fn service_error(&self, cx: &App) -> Option<String> {
         let app = self.application.read(cx);
-        app.error.clone().or_else(|| {
-            app.confirmed
-                .as_ref()
-                .and_then(|s| s.last_error.as_ref().map(|e| e.message.clone()))
-        })
+        app.error
+            .clone()
+            .or_else(|| {
+                app.confirmed
+                    .as_ref()
+                    .and_then(|s| s.last_error.as_ref().map(|e| e.message.clone()))
+            })
+            .filter(|message| !app.navigation_errors.values().any(|error| error == message))
     }
 
     pub(crate) fn open_project(&mut self, _: &OpenProject, _: &mut Window, cx: &mut Context<Self>) {
@@ -516,6 +547,7 @@ impl Render for Workbench {
             .render_conversation_region(window, cx)
             .into_any_element();
         let composer = self.render_composer_region(cx).into_any_element();
+        let navigation_notice = self.render_navigation_notice(cx).into_any_element();
         let view = cx.entity();
         let width = theme::sidebar_width_pixels(
             self.host.preferences().sidebar_width,
@@ -528,6 +560,7 @@ impl Render for Workbench {
             .overflow_hidden()
             .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::new_session))
             .on_action(cx.listener(Self::focus_composer))
             .on_action(cx.listener(Self::focus_navigation))
             .bg(theme::workspace_bg(cx))
@@ -575,6 +608,7 @@ impl Render for Workbench {
                                 .min_h_0()
                                 .bg(theme::workspace_bg(cx))
                                 .child(header)
+                                .child(navigation_notice)
                                 .child(conversation)
                                 .child(composer),
                         ),

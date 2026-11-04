@@ -1,6 +1,6 @@
 use crate::{
     theme,
-    workbench::{OpenProject, Workbench},
+    workbench::{NewSession, OpenProject, Workbench},
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -89,10 +89,24 @@ impl Workbench {
                 })
                 .when(has_directory, |col| {
                     col.child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::text_secondary(cx))
-                            .child("暂无会话"),
+                        Button::new("empty-new-session")
+                            .outline()
+                            .icon(IconName::Plus)
+                            .label("新建会话…")
+                            .disabled(
+                                self.host.is_fixture()
+                                    || !self.service_ready(cx)
+                                    || self.host.preferences().selected_project_id.is_some_and(
+                                        |id| {
+                                            self.application.read(cx).removing(
+                                                workbench_service::RemovalTarget::Project(id),
+                                            )
+                                        },
+                                    ),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_session(&NewSession, window, cx)
+                            })),
                     )
                 })
                 .when_some(self.picker_error.clone(), |col, error| {

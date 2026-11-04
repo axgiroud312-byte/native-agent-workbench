@@ -15,6 +15,6 @@ pub use workbench_core::{
     AuthenticationInteractionId, AuthenticationInteractionKind, AuthenticationMethod,
     AuthenticationMethodAvailability, AuthenticationMethodId, AuthenticationMethodKind,
     AuthenticationNotice, AuthenticationScope, AuthenticationStatus, BusinessError,
-    CommandEnvelope, Project, RequestId, SessionId, SessionSnapshot, Timestamp, WorkbenchSnapshot,
-    WorkspacePreferences,
+    CommandEnvelope, Project, ProjectId, RequestId, SessionId, SessionSnapshot, Timestamp,
+    WorkbenchSnapshot, WorkspacePreferences,
 };

@@ -53,6 +53,10 @@ open_project 在后台对真实目录 canonicalize，Windows 统一分隔符/大
 
 创建会话只走 core CreateSession，使用 caller 保留的 SessionRecord/CommandId；Agent 必须已登记。选择项目和选择会话各自保存视图偏好，项目选择不会隐式隐藏/终止其他会话。读取按稳定 ID，中文路径与名字保留。
 
+Issue #9 收口后，选择项目会清除属于其他项目的当前会话，选择会话同步选其项目；保存的视图关系保持一致。ApplicationService 接受新建请求后协调登记/连接/选择，低层 create_session 仍只登记。资源事实通过 SessionSnapshot.resources_released 读取，不从连接阶段猜测。
+
+validate_project_directory 在 worker 上核查保存路径。relocate_project 在同一 worker 规范化新路径、检查目录已登记冲突，然后交 core PutProject；仅所有关联会话资源已释放才允许换路径，原对象身份/历史路径不改。它返回 CommittedUpdate 给 app 管线发布，不执行连接。无效目录明确失败，不退回进程当前目录。
+
 remove_session/remove_project 仍受 core 资源释放门槛约束；服务不杀进程，不把 Interrupted 当“已安全释放”。上层协调停止/关闭，收到权威释放事实后才移除。事务删除投影、清理选中已删除对象和项目展开偏好，并去掉该对象的 journal payload；checkpoint 留去重身份/墓碑。项目源码目录、FileReference 目标、ImportedFile.original_path 都不进入删除代码，也不调用 Agent 全局历史删除接口。逻辑删除不等于磁盘级安全擦除。
 
 ## 附件所有权

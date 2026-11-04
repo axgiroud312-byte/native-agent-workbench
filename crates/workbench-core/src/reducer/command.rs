@@ -22,10 +22,10 @@ pub(super) fn apply(
                 && state
                     .sessions
                     .values()
-                    .any(|s| s.record.project_id() == project.id)
+                    .any(|s| s.record.project_id() == project.id && !s.resources_released)
             {
                 return Err(BusinessError::busy(
-                    "project directory cannot change beneath existing sessions",
+                    "release all project connections before explicitly relocating its directory",
                 ));
             }
             state.projects.insert(project.id, project.clone());

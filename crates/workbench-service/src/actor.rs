@@ -1,4 +1,7 @@
 mod catalog;
+mod navigation;
+#[cfg(test)]
+mod navigation_tests;
 #[cfg(test)]
 mod tests;
 
@@ -35,6 +38,10 @@ pub(crate) enum Message {
     FailNextViewSync {
         reply: Reply<()>,
     },
+    #[cfg(test)]
+    FailNextPreferencesWrite {
+        reply: Reply<()>,
+    },
     Command {
         command: CommandEnvelope,
         reply: Reply<CommandReceipt>,
@@ -47,6 +54,29 @@ pub(crate) enum Message {
     QuerySession {
         session_id: SessionId,
         reply: Reply<SessionReply>,
+    },
+    SelectProject {
+        project_id: Option<ProjectId>,
+        reply: Reply<u64>,
+    },
+    CreateSession {
+        project_id: ProjectId,
+        agent_id: AgentId,
+        title: String,
+        reply: Reply<SessionId>,
+    },
+    RemoveSession {
+        session_id: SessionId,
+        reply: Reply<()>,
+    },
+    RemoveProject {
+        project_id: ProjectId,
+        reply: Reply<()>,
+    },
+    RelocateProject {
+        project_id: ProjectId,
+        directory: PathBuf,
+        reply: Reply<Project>,
     },
     SelectSession {
         session_id: Option<SessionId>,
@@ -169,8 +199,11 @@ struct Actor {
     shutdown_error: Option<BusinessError>,
     // A failed fact transaction halts admissions; no facts are dropped or forwarded again.
     failed_events: Option<Vec<EventEnvelope>>,
+    removals: BTreeMap<RemovalTarget, navigation::Removal>,
     #[cfg(test)]
     fail_next_view_sync: bool,
+    #[cfg(test)]
+    fail_next_preferences_write: bool,
 }
 impl Actor {
     async fn new(
@@ -199,6 +232,16 @@ impl Actor {
             Some(id) => storage.session(id).await?,
             None => None,
         };
+        let mut project_directories = Vec::new();
+        for project in &workbench.projects {
+            let error = storage.validate_project_directory(project.id).await.err();
+            project_directories.push(ProjectDirectorySnapshot {
+                project_id: project.id,
+                directory: project.directory.clone(),
+                checked_at: now(),
+                error,
+            });
+        }
         let frame = ServiceSnapshot {
             revision: 1,
             selection: SelectionSnapshot {
@@ -216,6 +259,8 @@ impl Actor {
             prepared_installations: Vec::new(),
             running_installations: Vec::new(),
             last_error: None,
+            pending_removals: Vec::new(),
+            project_directories,
             shutting_down: false,
         };
         let (updates, watcher) = watch::channel(Arc::new(frame.clone()));
@@ -252,8 +297,11 @@ impl Actor {
                 auth_stopped: false,
                 shutdown_error: None,
                 failed_events: None,
+                removals: BTreeMap::new(),
                 #[cfg(test)]
                 fail_next_view_sync: false,
+                #[cfg(test)]
+                fail_next_preferences_write: false,
             },
             handle,
             receiver,
@@ -269,6 +317,7 @@ impl Actor {
     ) {
         let mut owner_gone = false;
         loop {
+            let removal_deadline = self.removals.values().map(|r| r.deadline).min();
             tokio::select! {
                 _=owner.changed(),if !owner_gone=>{owner_gone=true; self.begin_shutdown().await;},
                 message=messages.recv()=>match message {Some(message)=>self.handle(message).await,None=>self.begin_shutdown().await},
@@ -280,6 +329,10 @@ impl Actor {
                         Err(error)=>{self.failed_events=Some(batch);self.record_error(error);self.begin_shutdown().await;},
                     }
                 },
+                _=async {tokio::time::sleep_until(removal_deadline.unwrap_or_else(tokio::time::Instant::now)).await;},if removal_deadline.is_some()=>{},
+            }
+            if !self.removals.is_empty() {
+                self.advance_removals().await;
             }
             if self.frame.shutting_down
                 && self.runtime_stopped
@@ -312,6 +365,38 @@ impl Actor {
     }
     async fn handle(&mut self, message: Message) {
         match message {
+            #[cfg(test)]
+            Message::FailNextPreferencesWrite { reply } => {
+                self.fail_next_preferences_write = true;
+                let _ = reply.send(Ok(()));
+            }
+            Message::SelectProject { project_id, reply } => {
+                let result = self.select_project(project_id).await;
+                self.reply(reply, result);
+            }
+            Message::CreateSession {
+                project_id,
+                agent_id,
+                title,
+                reply,
+            } => {
+                let result = self.create_session(project_id, agent_id, title).await;
+                self.reply(reply, result);
+            }
+            Message::RemoveSession { session_id, reply } => {
+                self.remove(RemovalTarget::Session(session_id), reply).await
+            }
+            Message::RemoveProject { project_id, reply } => {
+                self.remove(RemovalTarget::Project(project_id), reply).await
+            }
+            Message::RelocateProject {
+                project_id,
+                directory,
+                reply,
+            } => {
+                let result = self.relocate(project_id, directory).await;
+                self.reply(reply, result);
+            }
             #[cfg(test)]
             Message::FailNextViewSync { reply } => {
                 self.fail_next_view_sync = true;
@@ -355,6 +440,17 @@ impl Actor {
             Message::Command { command, reply } => {
                 let result = async {
                     self.accept()?;
+                    if let Err(error) = self.command_admission(&command).await {
+                        if let Some(result) = self.storage.command_result(command.id).await? {
+                            return Ok(CommandReceipt {
+                                revision: self.frame.revision,
+                                committed_sequence: self.frame.workbench.sequence,
+                                command_id: command.id,
+                                result: result.status,
+                            });
+                        }
+                        return Err(error);
+                    }
                     let edited_agent = if let Command::PutAgent { agent } = &command.command {
                         Some((
                             agent.id,
@@ -366,17 +462,14 @@ impl Actor {
                         None
                     };
                     let id = command.id;
-                    let update = self.storage.execute(command).await?;
-                    self.committed(update).await?;
-                    let status = self
-                        .storage
-                        .command_result(id)
-                        .await?
-                        .ok_or_else(|| {
-                            fail(ErrorKind::Storage, "committed command result is missing")
-                        })?
-                        .status;
-                    if matches!(status, CommandStatus::Applied) {
+                    let directory_project =
+                        if let Command::PutProject { project } = &command.command {
+                            Some(project.id)
+                        } else {
+                            None
+                        };
+                    let (status, fresh) = self.commit_command(command).await?;
+                    if fresh && matches!(status, CommandStatus::Applied) {
                         if let Some((id, changed_launch)) = edited_agent {
                             *self.agent_edits.entry(id).or_default() += 1;
                             if changed_launch {
@@ -388,6 +481,9 @@ impl Actor {
                                 });
                                 self.publish();
                             }
+                        }
+                        if let Some(project_id) = directory_project {
+                            let _ = self.check_directory(project_id).await;
                         }
                     }
                     Ok(CommandReceipt {
@@ -413,6 +509,7 @@ impl Actor {
                         .await?;
                     self.storage.select_project(project.id).await?;
                     self.frame.workbench = self.storage.snapshot().await?;
+                    let _ = self.check_directory(project.id).await;
                     self.sync_preferences().await?;
                     self.publish();
                     Ok(project)
@@ -572,6 +669,13 @@ impl Actor {
                     .any(|s| s.id == id && s.connection.epoch == view.scope.epoch() && !s.closing)
             })
         });
+        self.frame.project_directories.retain(|entry| {
+            self.frame
+                .workbench
+                .projects
+                .iter()
+                .any(|p| p.id == entry.project_id)
+        });
         if let Some(error) = update.maintenance_errors.last() {
             self.frame.last_error = Some(error.clone());
         }
@@ -601,16 +705,19 @@ impl Actor {
             ));
         }
         let (revision, preferences) = self.storage.preferences_with_revision().await?;
-        if self.frame.selection.session_id != preferences.selected_session_id {
+        let selected = preferences.selected_session_id;
+        let changed = self.frame.selection.session_id != selected;
+        self.frame.preferences = preferences;
+        self.frame.preferences_revision = revision;
+        if changed {
             self.frame.selection.generation += 1;
-            self.frame.selection.session_id = preferences.selected_session_id;
-            self.frame.active_session = match preferences.selected_session_id {
+            self.frame.selection.session_id = selected;
+            self.frame.active_session = None;
+            self.frame.active_session = match selected {
                 Some(id) => self.storage.session(id).await?,
                 None => None,
             };
         }
-        self.frame.preferences = preferences;
-        self.frame.preferences_revision = revision;
         Ok(())
     }
     async fn store_preferences(
@@ -618,6 +725,10 @@ impl Actor {
         expected: u64,
         preferences: WorkspacePreferences,
     ) -> Result<u64, BusinessError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_preferences_write) {
+            return Err(fail(ErrorKind::Storage, "injected preference save failure"));
+        }
         if !(240..=320).contains(&preferences.sidebar_width) || preferences.zoom_percent == 0 {
             return Err(fail(
                 ErrorKind::InvalidInput,
@@ -634,6 +745,19 @@ impl Actor {
             return Err(fail(
                 ErrorKind::NotFound,
                 "selected project/session no longer exists",
+            ));
+        }
+        if preferences.selected_session_id.is_some_and(|id| {
+            self.frame
+                .workbench
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .is_some_and(|s| Some(s.project_id) != preferences.selected_project_id)
+        }) {
+            return Err(fail(
+                ErrorKind::InvalidInput,
+                "selected project must match the selected session",
             ));
         }
         self.storage
@@ -878,6 +1002,13 @@ impl Actor {
             return;
         }
         self.frame.shutting_down = true;
+        let removals = std::mem::take(&mut self.removals);
+        for (_, removal) in removals {
+            for reply in removal.replies {
+                let _ = reply.send(Err(closed()));
+            }
+        }
+        self.frame.pending_removals.clear();
         self.publish();
         for session in self.frame.workbench.sessions.clone() {
             let command = CommandEnvelope::new(

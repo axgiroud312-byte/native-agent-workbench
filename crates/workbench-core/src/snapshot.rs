@@ -139,6 +139,9 @@ pub struct DiagnosticSummary {
 #[non_exhaustive]
 pub struct SessionSnapshot {
     pub record: SessionRecord,
+    /// Authoritative core resource fact, never inferred from connection or run completion.
+    #[serde(default)]
+    pub resources_released: bool,
     pub closing: bool,
     pub closing_handoff: Option<ClosingResourceHandoff>,
     pub runs: Vec<Run>,
@@ -213,6 +216,7 @@ impl WorkbenchState {
         let can_steer = crate::reducer::is_steering_eligible(s);
         Some(SessionSnapshot {
             record: s.record.clone(),
+            resources_released: s.resources_released,
             closing: s.closing,
             closing_handoff: s.closing_handoff.clone(),
             runs: s.runs.values().cloned().collect(),

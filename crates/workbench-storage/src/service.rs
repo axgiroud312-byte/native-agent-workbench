@@ -143,6 +143,54 @@ impl WorkbenchService {
     pub fn project(&self, id: ProjectId) -> PortFuture<'static, Option<Project>> {
         self.storage.call(move |db| db.project(id))
     }
+    /// Filesystem evidence is obtained only on the storage worker, never by the UI.
+    pub fn validate_project_directory(&self, id: ProjectId) -> PortFuture<'static, PathBuf> {
+        self.storage.call(move |db| {
+            let project = db.project(id)?.ok_or_else(|| {
+                BusinessError::new(ErrorKind::NotFound, "project is absent", RetryAdvice::Never)
+            })?;
+            checked_directory(project.directory)
+        })
+    }
+    /// Explicit relocation keeps all historical objects/bindings intact. Core gates resources.
+    pub fn relocate_project(
+        &self,
+        command_id: CommandId,
+        id: ProjectId,
+        directory: PathBuf,
+        at: Timestamp,
+    ) -> PortFuture<'static, CommittedUpdate> {
+        self.storage.call(move |db| {
+            let directory = checked_directory(directory)?;
+            let key = project_key(&directory)?;
+            let occupant: Option<String> = db
+                .connection
+                .query_row(
+                    "SELECT id FROM project_index WHERE path_key=?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
+            if occupant.is_some_and(|owner| owner != id.to_string()) {
+                return Err(BusinessError::new(
+                    ErrorKind::Conflict,
+                    "directory already belongs to another project; projects were not merged",
+                    RetryAdvice::AfterCorrection,
+                ));
+            }
+            let mut project = db.project(id)?.ok_or_else(|| {
+                BusinessError::new(ErrorKind::NotFound, "project is absent", RetryAdvice::Never)
+            })?;
+            project.directory = directory;
+            db.apply(vec![JournalEntry::Command(CommandEnvelope::new(
+                command_id,
+                at,
+                Scope::default(),
+                Command::PutProject { project },
+            ))])
+        })
+    }
     pub fn list_sessions(&self, project: ProjectId) -> PortFuture<'static, Vec<SessionRecord>> {
         self.storage.call(move |db| db.sessions(project))
     }
@@ -159,14 +207,7 @@ impl WorkbenchService {
         at: Timestamp,
     ) -> PortFuture<'static, Project> {
         self.storage.call(move |db| {
-            let directory = fs::canonicalize(directory).map_err(storage_error)?;
-            if !directory.is_dir() {
-                return Err(BusinessError::new(
-                    ErrorKind::InvalidInput,
-                    "project is not a directory",
-                    RetryAdvice::AfterCorrection,
-                ));
-            }
+            let directory = checked_directory(directory)?;
             let key = project_key(&directory)?;
             let existing: Option<String> = db
                 .connection
@@ -237,12 +278,21 @@ impl WorkbenchService {
                 .preferences()?
                 .unwrap_or_else(|| Versioned::new(WorkspacePreferences::default()));
             preferences.record.selected_project_id = Some(id);
+            if let Some(session_id) = preferences.record.selected_session_id {
+                if db
+                    .session(session_id)?
+                    .is_none_or(|s| s.record.project_id() != id)
+                {
+                    preferences.record.selected_session_id = None;
+                }
+            }
             db.save_preferences(preferences)
         })
     }
     pub fn select_session(&self, id: SessionId) -> PortFuture<'static, ()> {
         self.storage.call(move |db| {
-            if db.session(id)?.is_none() {
+            let session = db.session(id)?;
+            if session.is_none() {
                 return Err(BusinessError::new(
                     ErrorKind::NotFound,
                     "session is not registered",
@@ -253,6 +303,7 @@ impl WorkbenchService {
                 .preferences()?
                 .unwrap_or_else(|| Versioned::new(WorkspacePreferences::default()));
             preferences.record.selected_session_id = Some(id);
+            preferences.record.selected_project_id = Some(session.unwrap().record.project_id());
             db.save_preferences(preferences)
         })
     }
@@ -340,6 +391,24 @@ impl WorkbenchService {
             })
         })
     }
+}
+
+fn checked_directory(directory: PathBuf) -> Result<PathBuf, BusinessError> {
+    let directory = fs::canonicalize(directory).map_err(|_| {
+        BusinessError::new(
+            ErrorKind::InvalidInput,
+            "project directory is unavailable; select its actual location",
+            RetryAdvice::AfterCorrection,
+        )
+    })?;
+    if !directory.is_dir() {
+        return Err(BusinessError::new(
+            ErrorKind::InvalidInput,
+            "project path is not a directory",
+            RetryAdvice::AfterCorrection,
+        ));
+    }
+    Ok(directory)
 }
 
 fn ensure_applied(update: &CommittedUpdate) -> Result<(), BusinessError> {

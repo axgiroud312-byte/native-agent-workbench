@@ -5,6 +5,7 @@ mod composer;
 mod conversation;
 mod fixture;
 mod host;
+mod navigation;
 mod settings;
 mod settings_agents;
 mod sidebar;
@@ -13,7 +14,9 @@ mod workbench;
 
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
-use workbench::{FocusComposer, FocusNavigation, OpenProject, OpenSettings, Quit, Workbench};
+use workbench::{
+    FocusComposer, FocusNavigation, NewSession, OpenProject, OpenSettings, Quit, Workbench,
+};
 
 fn main() {
     application().with_assets(assets::Assets).run(|cx| {
@@ -26,6 +29,7 @@ fn main() {
         cx.set_global(application::ApplicationOwner(application));
         cx.bind_keys([
             KeyBinding::new("ctrl-o", OpenProject, Some("Workbench")),
+            KeyBinding::new("ctrl-n", NewSession, Some("Workbench")),
             KeyBinding::new("ctrl-q", Quit, None),
             KeyBinding::new("ctrl-,", OpenSettings, Some("Workbench")),
             KeyBinding::new("ctrl-l", FocusComposer, Some("Workbench")),

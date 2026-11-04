@@ -189,7 +189,7 @@ impl WorkbenchHost {
         }
     }
 }
-fn now() -> Timestamp {
+pub(crate) fn now() -> Timestamp {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

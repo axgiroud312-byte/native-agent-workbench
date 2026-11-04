@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 use workbench_core::*;
-use workbench_service::{ApplicationService, ServiceOptions, ServiceSnapshot};
+use workbench_service::{ApplicationService, RemovalTarget, ServiceOptions, ServiceSnapshot};
 
 pub(crate) struct ApplicationState {
     pub(crate) handle: Option<ApplicationService>,
@@ -22,6 +22,10 @@ pub(crate) struct ApplicationState {
     draft_failures: BTreeMap<SessionId, String>,
     quit_requested: bool,
     shutdown_started: bool,
+    pub(crate) navigation_errors: BTreeMap<RemovalTarget, String>,
+    navigation_requests: BTreeSet<RemovalTarget>,
+    pub(crate) relocating_projects: BTreeSet<ProjectId>,
+    pub(crate) connection_requests: BTreeSet<SessionId>,
 }
 
 /// One application owner, independent of settings dialogs and selected sessions.
@@ -32,7 +36,6 @@ impl Global for ApplicationOwner {}
 pub(crate) enum PreferenceEdit {
     Zoom(u16),
     Sidebar(u16),
-    Project(ProjectId),
     ProjectExpanded(ProjectId, bool),
     ToolExpanded(ToolCallId, bool),
 }
@@ -41,7 +44,6 @@ impl PreferenceEdit {
         match *self {
             Self::Zoom(value) => preferences.zoom_percent = value,
             Self::Sidebar(value) => preferences.sidebar_width = value,
-            Self::Project(id) => preferences.selected_project_id = Some(id),
             Self::ProjectExpanded(id, expanded) => {
                 if expanded {
                     preferences.expanded_projects.insert(id);
@@ -60,9 +62,7 @@ impl PreferenceEdit {
     }
     fn same_target(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Zoom(_), Self::Zoom(_))
-            | (Self::Sidebar(_), Self::Sidebar(_))
-            | (Self::Project(_), Self::Project(_)) => true,
+            (Self::Zoom(_), Self::Zoom(_)) | (Self::Sidebar(_), Self::Sidebar(_)) => true,
             (Self::ProjectExpanded(a, _), Self::ProjectExpanded(b, _)) => a == b,
             (Self::ToolExpanded(a, _), Self::ToolExpanded(b, _)) => a == b,
             _ => false,
@@ -89,6 +89,10 @@ impl ApplicationState {
             draft_failures: BTreeMap::new(),
             quit_requested: false,
             shutdown_started: false,
+            navigation_errors: BTreeMap::new(),
+            navigation_requests: BTreeSet::new(),
+            relocating_projects: BTreeSet::new(),
+            connection_requests: BTreeSet::new(),
         };
         if enabled {
             this.start(cx);
@@ -169,6 +173,13 @@ impl ApplicationState {
         if previous_zoom != Some(snapshot.preferences.zoom_percent) {
             theme::apply_zoom_percent(snapshot.preferences.zoom_percent, cx);
         }
+        let sessions: BTreeSet<_> = snapshot.workbench.sessions.iter().map(|s| s.id).collect();
+        self.draft_edits.retain(|id, _| sessions.contains(id));
+        self.draft_failures.retain(|id, _| sessions.contains(id));
+        self.navigation_errors.retain(|target, _| match target {
+            RemovalTarget::Session(id) => sessions.contains(id),
+            RemovalTarget::Project(id) => snapshot.workbench.projects.iter().any(|p| p.id == *id),
+        });
         self.confirmed = Some(snapshot);
         cx.notify();
     }
@@ -243,6 +254,158 @@ impl ApplicationState {
         self.draft_edits.get(&id).map(String::as_str)
     }
 
+    pub(crate) fn select_project(&mut self, id: Option<ProjectId>, cx: &mut Context<Self>) {
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        let future = handle.select_project(id);
+        cx.spawn(async move |this, cx| {
+            let result = future.await;
+            let _ = this.update(cx, |state, cx| {
+                state.publish(handle.snapshot(), cx);
+                state.error = result.err().map(|e| e.message);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn removing(&self, target: RemovalTarget) -> bool {
+        self.navigation_requests.contains(&target)
+            || self.confirmed.as_ref().is_some_and(|frame| {
+                frame.pending_removals.iter().any(|removal| {
+                    removal.target == target
+                        || match target {
+                        RemovalTarget::Session(id) => removal.waiting_sessions.contains(&id)
+                            || matches!(removal.target, RemovalTarget::Project(project) if frame.workbench.sessions.iter().any(|s| s.id == id && s.project_id == project)),
+                            RemovalTarget::Project(_) => false,
+                        }
+                })
+            })
+    }
+
+    pub(crate) fn remove(&mut self, target: RemovalTarget, cx: &mut Context<Self>) {
+        if self.removing(target) {
+            return;
+        }
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        self.navigation_requests.insert(target);
+        self.navigation_errors.remove(&target);
+        let future = match target {
+            RemovalTarget::Session(id) => handle.remove_session(id),
+            RemovalTarget::Project(id) => handle.remove_project(id),
+        };
+        cx.spawn(async move |this, cx| {
+            let result = future.await;
+            let _ = this.update(cx, |state, cx| {
+                state.navigation_requests.remove(&target);
+                state.publish(handle.snapshot(), cx);
+                if let Err(error) = result {
+                    state.navigation_errors.insert(target, error.message);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn relocate(&mut self, id: ProjectId, path: PathBuf, cx: &mut Context<Self>) {
+        if self.relocating_projects.contains(&id) || self.removing(RemovalTarget::Project(id)) {
+            return;
+        }
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        self.relocating_projects.insert(id);
+        self.navigation_errors.remove(&RemovalTarget::Project(id));
+        let future = handle.relocate_project(id, path);
+        cx.spawn(async move |this, cx| {
+            let result = future.await;
+            let _ = this.update(cx, |state, cx| {
+                state.relocating_projects.remove(&id);
+                state.publish(handle.snapshot(), cx);
+                if let Err(error) = result {
+                    state
+                        .navigation_errors
+                        .insert(RemovalTarget::Project(id), error.message);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn connection_action(
+        &mut self,
+        id: SessionId,
+        connect: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_requests.contains(&id) || self.removing(RemovalTarget::Session(id)) {
+            return;
+        }
+        let Some(handle) = self.handle.clone() else {
+            return;
+        };
+        self.connection_requests.insert(id);
+        self.navigation_errors.remove(&RemovalTarget::Session(id));
+        let query = handle.query_session(id);
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let reply = query.await?;
+                let session = reply.snapshot.ok_or_else(|| {
+                    BusinessError::new(ErrorKind::NotFound, "会话已不存在", RetryAdvice::Never)
+                })?;
+                if reply.session_id != id || session.record.id() != id {
+                    return Err(BusinessError::new(
+                        ErrorKind::InvalidInput,
+                        "会话查询归属不匹配",
+                        RetryAdvice::Never,
+                    ));
+                }
+                if !connect && session.resources_released {
+                    return Ok(());
+                }
+                let command = if connect {
+                    Command::Connect {
+                        resume: session.record.external.is_some(),
+                    }
+                } else {
+                    Command::CloseSession
+                };
+                let receipt = handle
+                    .execute(CommandEnvelope::new(
+                        CommandId::new(),
+                        crate::host::now(),
+                        workbench_core::Scope::session(id, session.record.connection.epoch),
+                        command,
+                    ))
+                    .await?;
+                match receipt.result {
+                    CommandStatus::Applied => Ok(()),
+                    CommandStatus::Rejected { error } => Err(error),
+                }
+            }
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                state.connection_requests.remove(&id);
+                state.publish(handle.snapshot(), cx);
+                if let Err(error) = result {
+                    state
+                        .navigation_errors
+                        .insert(RemovalTarget::Session(id), error.message);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(crate) fn draft_error(&self, id: SessionId) -> Option<&str> {
         self.draft_failures.get(&id).map(String::as_str)
     }
@@ -295,9 +458,13 @@ impl ApplicationState {
                         state.flush_draft(id, cx);
                     }
                     Err(error) => {
-                        state
-                            .draft_failures
-                            .insert(id, format!("草稿未保存：{}", error.message));
+                        if state.confirmed.as_ref().is_some_and(|frame| {
+                            frame.workbench.sessions.iter().any(|s| s.id == id)
+                        }) {
+                            state
+                                .draft_failures
+                                .insert(id, format!("草稿未保存：{}", error.message));
+                        }
                     }
                 }
                 state.maybe_shutdown(cx);

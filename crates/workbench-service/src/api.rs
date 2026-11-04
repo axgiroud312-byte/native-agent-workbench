@@ -47,6 +47,29 @@ pub struct AuthenticationView {
     pub interactions: Vec<AuthenticationInteraction>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RemovalTarget {
+    Session(SessionId),
+    Project(ProjectId),
+}
+
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct RemovalSnapshot {
+    pub target: RemovalTarget,
+    pub waiting_sessions: Vec<SessionId>,
+}
+
+/// Last background filesystem check; None means the stored directory was usable.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ProjectDirectorySnapshot {
+    pub project_id: ProjectId,
+    pub directory: PathBuf,
+    pub checked_at: Timestamp,
+    pub error: Option<BusinessError>,
+}
+
 /// Atomic read projection of confirmed service state. Never a mutable business aggregate.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -63,6 +86,8 @@ pub struct ServiceSnapshot {
     pub prepared_installations: Vec<agent_catalog::InstallPlan>,
     pub running_installations: Vec<agent_catalog::InstallPlanId>,
     pub last_error: Option<BusinessError>,
+    pub pending_removals: Vec<RemovalSnapshot>,
+    pub project_directories: Vec<ProjectDirectorySnapshot>,
     pub shutting_down: bool,
 }
 
@@ -125,6 +150,43 @@ impl ApplicationService {
     }
     pub fn query_session(&self, session_id: SessionId) -> ServiceFuture<'static, SessionReply> {
         self.request(move |reply| crate::actor::Message::QuerySession { session_id, reply })
+    }
+    /// Select a project; clears a selected session belonging to another project.
+    pub fn select_project(&self, project_id: Option<ProjectId>) -> ServiceFuture<'static, u64> {
+        self.request(move |reply| crate::actor::Message::SelectProject { project_id, reply })
+    }
+    /// Registers once, selects it, then durably dispatches Connect. Ready is a later fact.
+    pub fn create_session(
+        &self,
+        project_id: ProjectId,
+        agent_id: AgentId,
+        title: String,
+    ) -> ServiceFuture<'static, SessionId> {
+        self.request(move |reply| crate::actor::Message::CreateSession {
+            project_id,
+            agent_id,
+            title,
+            reply,
+        })
+    }
+    /// Close owned resources asynchronously; delete only after authoritative release.
+    pub fn remove_session(&self, session_id: SessionId) -> ServiceFuture<'static, ()> {
+        self.request(move |reply| crate::actor::Message::RemoveSession { session_id, reply })
+    }
+    pub fn remove_project(&self, project_id: ProjectId) -> ServiceFuture<'static, ()> {
+        self.request(move |reply| crate::actor::Message::RemoveProject { project_id, reply })
+    }
+    /// Explicit path change. All existing connections must already be released.
+    pub fn relocate_project(
+        &self,
+        project_id: ProjectId,
+        directory: PathBuf,
+    ) -> ServiceFuture<'static, Project> {
+        self.request(move |reply| crate::actor::Message::RelocateProject {
+            project_id,
+            directory,
+            reply,
+        })
     }
     pub fn select_session(&self, session_id: Option<SessionId>) -> ServiceFuture<'static, u64> {
         self.request(move |reply| crate::actor::Message::SelectSession { session_id, reply })

@@ -27,11 +27,27 @@ Runtime 事实通道上限 512，背压等待，不按 token 丢弃。每批至�
 
 `execute(CommandEnvelope)` 贯穿原 CommandId、Scope、会话、run、request、epoch。返回 CommandReceipt（确认的 journal sequence、视图 revision、真实持久 CommandStatus）。重复命令也读取原结果，因此被拒命令不会因再次提交而变成 Applied。
 
+新鲜命令直接使用同次事务 CommittedDecision 的 Applied/Rejected；只有 Duplicate 才读取原持久结果。后续可选数据库查询不能把已确定的业务提交误报成未提交。准入检查失败而命令身份实际已提交时，仍返回原结果，不重新交付 effect。
+
 ## 选择与偏好
 
 `open_project(directory,name)` 复用 storage 的规范路径身份并选中项目。`select_session(Option<SessionId>)` 保存选择、读取该会话，再发布单次确认视图。查询在同一后台串行流内完成，晚到查询不能更改后来的选择。`query_session(id)` 只返回 SessionReply，带 session_id、selection_generation、committed_sequence；它不改变 active_session。UI 不得用旧 reply 覆盖订阅的较新正文或草稿。
 
 `save_preferences(expected_revision,preferences)` 对 SQLite 中的实际修改版本执行 CAS，成功后发布真实读回值。preferences_revision 跨重启保留，独立于 schema/model version；旧请求返回 Conflict。storage schema v3 从 v1/v2 保留既有偏好，并增加独立计数。删除对象导致的选择清理也递增该值。侧栏宽度遵循 240–320；选择身份必须存在。持久视图偏好不会进入会话业务 reducer。
+
+### Issue #9 项目与会话操作
+
+`select_project(Option<ProjectId>)` 保持项目与当前会话归属一致：换到另一个项目时清空不属于它的会话选择，选择 None 同时清会话；相同项目保留当前会话。不会停止其他项目任务。需要在另一项目新建时显式传 project_id，不把 selected_project 静默解释为独立默认目录。storage 的选项目/选会话也保持这一关系；重建会修复旧不一致偏好，写入仍有实际修订号。
+
+`create_session(project_id,agent_id,title)` 验证目录与已配置 Agent，分配一次本地身份，经统一 core 管线创建、持久化 Connect，再保存选择；返回 SessionId 表示本地记录已创建，不代表 Ready。创建已确认后，连接或偏好失败会保留真实状态、last_error 并仍返回该 ID，防止 UI 重试制造第二条记录。新 external 只由 Runtime 的真实 SessionRegistered 提供；已有 external 继续连接必须 resume:true。
+
+`remove_session(id)` / `remove_project(id)` 由应用后台协调。未连接/已释放记录直接走 core 删除；其他目标先 CloseSession，继续处理其他会话，直到相同 session+epoch 的权威资源释放事实已持久化才删。删除项目需全部目标会话释放后一个 DeleteProject 原子移除索引。等待最多 15 秒，超时保留记录并返回 ReconcileFirst，不在迟到释放后偷偷完成已超时删除。同一对象的重复请求共享等待；重叠删除、目标重连、被删项目的新建会话会明确 Busy。关闭后的历史保留，直到删除命令真正成功。
+
+SessionSnapshot.resources_released 是 core 原始资源事实的只读投影，serde 对旧投影保守默认 false。UI 不以 Disconnected/取消请求/工单完成代替该事实。closing_handoff 未核实时保留记录并要求权威核对，服务不伪造释放或猜测进程所有权。pending_removals 展示实际正在等待的目标和会话；错误通过该操作 future 与 last_error 返回。
+
+`relocate_project(id,directory)` 是用户明确选择新目录的窄操作。所有旧连接必须已确认释放，无未核实 closing_handoff；否则 Busy/ReconcileFirst，不偷偷关闭连接。后台规范化目录并核对已登记身份；目录冲突返回 Conflict，不合并项目。只有 Project.directory 更新，历史正文、文件引用、差异、运行和 external 原样保留，不按新根目录重写旧路径；后续 SDK 恢复拒绝则保留真实错误/历史，不悄悄创建新远端上下文。
+
+project_directories 为每个项目提供最近一次后台目录检查的路径、checked_at 与可选错误。启动、打开/选项目、新建/连接和显式重新定位时检查；目录失效不丢历史，禁止隐式回退 cwd，用户可关闭旧连接后重新定位。相关文件系统查询全部留在 storage worker。选择切换先清旧 active_session，再读取新归属，读失败也不会把旧会话正文挂到新选择下。
 
 ## Agent 目录与安装
 

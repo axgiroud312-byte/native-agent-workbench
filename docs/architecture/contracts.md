@@ -95,6 +95,8 @@ AuthenticationScope 明确 AgentId+连接代次，可关联已有**本地** Sess
 
 CloseSession 设置独立 closing 门槛，旧 Ready 不可解除；期间拒绝提交/配置/继续队列。匹配 ResourcesReleased 后才能显式新建 epoch 连接。Runtime 仅操作 effect 指定 session+epoch 拥有的资源；旧释放事件不能关闭新连接。删除要求资源释放，留 tombstone；不删项目目录、不清其他客户端历史。
 
+SessionSnapshot.resources_released 只读展示同一 core 资源事实（旧投影 serde 默认 false），不由 UI 推导。用户显式重新定位项目时，PutProject 改目录仅在全部关联会话资源已释放后放行；现有 Session/Run/Message/FileChange/FileReference/external 内容不被修改。存储负责新目录 canonicalize/唯一身份检查；之后存在 external 的连接仍须 resume:true，不能在恢复失败时静默 session/new。
+
 若 CloseSession 保存后、ResourcesReleased 前崩溃，Restart 保留 closing 和“未证实释放”，同时把原资源 epoch 交接到 ClosingResourceHandoff；新实例不再等待旧 epoch 回调。app 使用**当前连接代次+新 RequestId**提交 ReconcileClosingResources，effect 同时指明原 abandoned_epoch。Runtime 只能依据确属该会话/原代次的所有权证据核查或清理，不能按进程名/猜测 PID 杀其他实例的进程。ClosingResourcesReconciled(Released) 必须匹配当前核对请求与原代次，才允许删除或显式新建连接；Unconfirmed 保持关闭/删除门槛并允许重新核查。普通旧 ResourcesReleased 仍被过滤，连当前代次的普通 ResourcesReleased 也不能代替该交接证明。再次崩溃保留最初资源代次，使上一轮核对请求失效；清理证据不等于旧任务成功完成。
 
 本地 replay 只重建状态、清空 effects；恢复完成后 app 必须提交 Restart 再开放实时操作。Restart 递增代次、断连、失效请求、旧运行 Interrupted、未确认交付 Unknown、队列暂停；编辑内容和附件仍保留。旧能力/配置值可读但不能当新连接确认。
