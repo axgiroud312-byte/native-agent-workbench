@@ -10,6 +10,7 @@ description = "Native Agent Workbench desktop application"
 
 [dependencies]
 gpui-kit.workspace = true
+workbench-core = { path = "../workbench-core" }
 
 [lints]
 workspace = true

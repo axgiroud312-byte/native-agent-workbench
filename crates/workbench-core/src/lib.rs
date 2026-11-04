@@ -1,9 +1,11 @@
 //! Shared business objects owned by the workbench, independent of UI, protocol and storage.
 //!
-//! This crate defines identity and lifecycle facts. Command/event routing, mutation rules,
-//! persistence, and Agent I/O belong to subsequent tasks. See `docs/architecture/domain-model.md`.
+//! This crate defines business objects, commands/events, the pure reducer, typed snapshots,
+//! and asynchronous service ports. Persistence and Agent I/O are implemented by adapters.
+//! See `docs/architecture/domain-model.md` and `docs/architecture/contracts.md`.
 
 mod agent;
+mod authentication;
 mod configuration;
 mod content;
 mod contract;
@@ -22,6 +24,7 @@ mod tool;
 mod transport;
 
 pub use agent::*;
+pub use authentication::*;
 pub use configuration::*;
 pub use content::*;
 pub use contract::*;

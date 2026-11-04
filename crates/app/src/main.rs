@@ -1,11 +1,16 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod composer;
+mod conversation;
+mod fixture;
+mod host;
+mod sidebar;
 mod theme;
 mod workbench;
 
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
-use workbench::{OpenProject, Quit, Workbench};
+use workbench::{FocusComposer, FocusNavigation, OpenProject, OpenSettings, Quit, Workbench};
 
 fn main() {
     application().with_assets(assets::Assets).run(|cx| {
@@ -14,6 +19,9 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("ctrl-o", OpenProject, Some("Workbench")),
             KeyBinding::new("ctrl-q", Quit, None),
+            KeyBinding::new("ctrl-,", OpenSettings, Some("Workbench")),
+            KeyBinding::new("ctrl-l", FocusComposer, Some("Workbench")),
+            KeyBinding::new("ctrl-shift-e", FocusNavigation, Some("Workbench")),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| {

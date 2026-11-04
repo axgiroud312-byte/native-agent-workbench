@@ -79,6 +79,20 @@ Stop 立即暂停队列、失效请求，再交 responder 取消和 session/canc
 
 表单支持 Text/Choices 子集，保留 property ID 和 secret 标记；Declined 与 Cancelled 分开。数字/布尔/数组或无法验证的约束映射 Unsupported，core 内保留原 schema。未知 required 不可省略后伪报成功，仍可 decline/cancel。secret 值和认证交互走不持久化的 Runtime 官方认证流程，不提交到聊天日志。SDK 回调注册/转交请求后继续派发，不能 await 用户点击阻塞流式和取消。
 
+### 独立的临时认证端口
+
+`AuthenticationPort::execute_authentication(AuthenticationRequest, AuthenticationNoticeSink)` 是 Runtime 的独立可选接口，保持 RuntimePort/StoragePort 的现有签名和消费者兼容。认证请求/通知均**不实现 Serialize/Deserialize**，不加入 Command、Event、JournalRecord、WorkbenchState 或数据库；app 直接消费 typed 临时通知，不转发给持久 RuntimeEventSink。当前仅声明共享类型和端口，具体适配由 Runtime 负责人完成，未增加 #8 UI 或安装管理。
+
+AuthenticationScope 明确 AgentId+连接代次，可关联已有**本地** SessionId，也可只有 Agent 范围；没有 RunId 或外部会话要求，故 session/new 之前的认证/elicitation 不伪造运行归属。Runtime 验证完整 scope、原认证请求和活跃交互，旧连接、已取消/过期流程不能被旧按钮复活。Agent-only 的代次属于该 Agent 认证连接，不与其他会话连接的同值数字混为一谈。
+
+- Discover 只返回 Agent 实际报告的 AuthenticationMethodId、公开名称/说明、种类与实际可用性，不写死 provider 方法 ID。发现方法既不证明需要认证，也不证明已登录。
+- Authenticate 选择实际提供的 method_id，启动官方机制。AgentManaged 映射 SDK authenticate(methodId)；Terminal 表示官方终端机制，不能把它送到 authenticate，未实现处理器须标 Unavailable。终端 args/env、原始 _meta 均由 Runtime 保留，不进入共享方法通知。需要宿主尚未实现的 secret 输入时明确 SecretEntryUnsupported，不搭建凭据收集或存储系统。
+- 状态独立为 Unknown/Discovering/Required/InProgress/Authenticated/Cancelled/Failed；Authenticated 必须来自真实官方认证成功或已核实的登录复用，不能由“方法存在”“URL 已打开”“elicitation 已交付”推断。失败使用非机密分类，不能把原始错误 JSON/stderr/临时 URL/token 写入失败文案或 PortFuture 的 BusinessError。
+- request-scoped `elicitation/create` 的 URL、message、secret schema/值、SDK responder 留在 Runtime。UI 只收到 opaque AuthenticationInteractionId 和 OfficialUrl/UnsupportedSecret 类型；OpenOfficialFlow 指示 Runtime 打开其保留的官方 URL，然后经原 responder 交付 accept，Decline/Cancel 分别交付对应动作。没有 URL/token/密码字段进入 core 请求，UnsupportedSecret 不假装可回答。
+- `elicitation/complete`、撤销、取消或断连产生 InteractionClosed 并使句柄失效。InteractionClosed(Completed) 仅表示该交互结束，认证是否成功仍由独立 Status 说明。句柄本身不是远端 RPC ID 或可跨连接恢复的凭据。
+
+本接口以 t2w 的 SDK5/schema1.15.1 窄核查与 initialize-only 实测对齐：正常 Windows 配置报告 api-key/API Key 和 chat-gpt/ChatGPT；NO_BROWSER 会影响实际方法集合，所以 core 不硬编码这两项，也不以隐藏浏览器作为默认认证条件。标准请求仅 methodId，回应为可带 _meta 的空对象；方法的发现、调用和终端种类遵守已固定 SDK 的实际映射。该上游/Runtime 证据不代表本轮已执行新接口的真实认证或用户验收。
+
 CloseSession 设置独立 closing 门槛，旧 Ready 不可解除；期间拒绝提交/配置/继续队列。匹配 ResourcesReleased 后才能显式新建 epoch 连接。Runtime 仅操作 effect 指定 session+epoch 拥有的资源；旧释放事件不能关闭新连接。删除要求资源释放，留 tombstone；不删项目目录、不清其他客户端历史。
 
 若 CloseSession 保存后、ResourcesReleased 前崩溃，Restart 保留 closing 和“未证实释放”，同时把原资源 epoch 交接到 ClosingResourceHandoff；新实例不再等待旧 epoch 回调。app 使用**当前连接代次+新 RequestId**提交 ReconcileClosingResources，effect 同时指明原 abandoned_epoch。Runtime 只能依据确属该会话/原代次的所有权证据核查或清理，不能按进程名/猜测 PID 杀其他实例的进程。ClosingResourcesReconciled(Released) 必须匹配当前核对请求与原代次，才允许删除或显式新建连接；Unconfirmed 保持关闭/删除门槛并允许重新核查。普通旧 ResourcesReleased 仍被过滤，连当前代次的普通 ResourcesReleased 也不能代替该交接证明。再次崩溃保留最初资源代次，使上一轮核对请求失效；清理证据不等于旧任务成功完成。

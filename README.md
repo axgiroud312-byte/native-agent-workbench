@@ -2,7 +2,7 @@
 
 Windows 优先的开源原生 Agent 工作台，使用 Rust、GPUI Kit 和 ACP，先把 Codex 的日常工作体验做好。
 
-**当前状态：已有 Rust + GPUI Kit 最小启动工程，以及共享业务对象、命令/事件和状态更新契约。Agent、会话存储和托盘尚未接入，没有正式安装包。**
+**当前状态：共享业务契约、SQLite 存储、原生双栏基础和 Codex ACP 后端已实现。后端已有真实流式调用、停止和双会话证据；桌面界面与这些服务的完整接线正在开发，尚无正式安装包。**
 
 目标是一个不透明炭灰色、弱外框和弱顶栏的双栏窗口：左侧组织项目与会话，右侧完成输入、流式对话、工具执行、审批和结果查看。多个会话可在同一项目目录并行工作；关闭窗口后收进托盘继续运行。
 
@@ -21,7 +21,7 @@ Windows 优先的开源原生 Agent 工作台，使用 Rust、GPUI Kit 和 ACP�
 
 Rust + GPUI Kit + ACP Rust SDK + Tokio + SQLite。主界面不使用 Electron、React 或 WebView。优先通过 `agentclientprotocol/codex-acp` 接入 Codex；其他 Agent 按实际能力适配。
 
-初始工程使用 Rust **1.98.1**、GPUI Kit **0.9.0**，通过 `rust-toolchain.toml` 和 `Cargo.lock` 固定工具链与依赖。ACP、Tokio、SQLite 随后续业务实现加入，当前不引入空模块和未使用依赖。
+工程使用 Rust **1.98.1**、GPUI Kit **0.9.0**、ACP Rust SDK **5.0.0**、Tokio 和 SQLite，通过 `rust-toolchain.toml` 和 `Cargo.lock` 固定工具链与依赖。
 
 ## Windows 开发与运行
 
@@ -41,9 +41,13 @@ cargo run --locked
 
 启动后显示炭灰双栏窗口，可点击“选择文件夹…”或按 `Ctrl+O` 打开系统文件夹选择器。选择只改变当前窗口的工作目录展示，不写入所选目录；当前尚不保存项目，也不能调用 Agent。`Ctrl+Q` 或关闭窗口退出程序，托盘行为属于后续开发。
 
-目录结构：`crates/app/src/main.rs` 负责启动与生命周期，`theme.rs` 集中主题与尺寸，`workbench.rs` 持有窗口状态和目录选择交互。随着实际功能增长再拆分 crate。
+`Ctrl+L` 聚焦输入，`Ctrl+Shift+E` 聚焦导航，`Ctrl+,` 打开设置。设置支持 100/125/150% 应用缩放。开发者可以通过 `cargo run --locked -- --dev-fixture` 查看明确标记的布局样例；样例不调用 Agent，也不是用户历史。
+
+目录结构：`crates/app/src/main.rs` 负责启动与生命周期，`theme.rs` 集中主题与尺寸，`workbench.rs` 组合原生窗口；侧栏、正文、输入和服务入口分别位于同目录模块。
 
 `crates/workbench-core` 提供独立于 UI、协议和数据库的共享业务类型、唯一状态更新器和异步服务接口；见 [业务对象说明](docs/architecture/domain-model.md) 与 [命令/事件契约](docs/architecture/contracts.md)。序列化和关键状态场景已有定向检查，不代表会话或 Agent 功能已可使用。
+
+`crates/workbench-storage` 提供后台 SQLite、迁移、项目/会话与附件保存，见 [存储边界](docs/architecture/storage.md)。`crates/agent-runtime` 提供独立进程、ACP 事件转换、取消与临时认证，见 [Runtime 用法及真实检查](docs/architecture/runtime.md)。窗口状态与接入约定见 [UI 架构](docs/architecture/ui.md)。
 
 ## 本地开发技能
 
@@ -74,4 +78,10 @@ GitHub Actions 检查文档、Rust 格式和 Windows 构建，不额外上传 ex
 - `Ctrl+O` 重新打开选择器；Escape 取消后保留原目录，并恢复按钮可用状态。
 - `Alt+F4` 关闭窗口后进程退出，没有遗留启动工程进程。
 
-这些是初始化工程的运行检查，不代表 MVP 或视觉方案已获用户验收。Agent 调用、中文输入框/输入法、托盘和持久化仍待实现及验收。
+随后实现阶段已取得的证据：
+
+- SQLite 真实临时目录检查覆盖事务回滚、迁移、重开、共享附件与删除边界。
+- Codex ACP 后端在隔离目录完成真实流式输出、运行中停止和两个会话并行；跟踪的自有进程在结束后全部退出。
+- 原生窗口完成两行中文文本输入、应用缩放及选择器取消检查。自动输入中文不等于中文输入法候选组合验收。
+
+这些证据不代表完整 MVP 或视觉方案已获用户验收。界面与服务接线、真实登录交互、完整对话操作、重启恢复和托盘仍待后续实现与验证。
