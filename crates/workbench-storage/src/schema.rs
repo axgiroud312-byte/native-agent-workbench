@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use workbench_core::*;
 
 pub(crate) const APPLICATION_ID: i32 = 0x41574231;
-pub(crate) const VERSION: i32 = 2;
+pub(crate) const VERSION: i32 = 3;
 pub(crate) const V1: &str = "
 CREATE TABLE workbench_state (id INTEGER PRIMARY KEY CHECK(id=1), sequence INTEGER NOT NULL, snapshot_json TEXT NOT NULL);
 CREATE TABLE journal (sequence INTEGER PRIMARY KEY, session_id TEXT, record_json TEXT NOT NULL);
@@ -55,8 +55,11 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<(), BusinessError> 
         )
         .map_err(storage_error)?;
     }
-    // A real v1 -> v2 migration, not CREATE IF NOT EXISTS against old columns.
-    tx.execute_batch("
+    // Independent persisted edit revision; schema/model versions are not edit identities.
+    tx.execute_batch("CREATE TABLE preference_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision>=0)); INSERT INTO preference_revision SELECT 1, CASE WHEN EXISTS(SELECT 1 FROM preferences) THEN 1 ELSE 0 END;").map_err(storage_error)?;
+    if version < 2 {
+        // A real v1 -> v2 migration, not CREATE IF NOT EXISTS against old columns.
+        tx.execute_batch("
 ALTER TABLE blobs ADD COLUMN pending_gc INTEGER NOT NULL DEFAULT 0 CHECK(pending_gc IN(0,1));
 ALTER TABLE journal RENAME TO journal_v1;
 CREATE TABLE journal (sequence INTEGER PRIMARY KEY, session_id TEXT, project_id TEXT, command_id TEXT, event_id TEXT, record_json TEXT);
@@ -69,23 +72,24 @@ CREATE TABLE session_index (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERE
 CREATE INDEX session_project ON session_index(project_id);
 CREATE TABLE blob_refs (blob_id TEXT NOT NULL REFERENCES blobs(id), session_id TEXT NOT NULL REFERENCES session_index(id) ON DELETE CASCADE, attachment_id TEXT NOT NULL, PRIMARY KEY(blob_id,session_id,attachment_id));
 ").map_err(storage_error)?;
-    let state = effective_state(&tx)?;
-    let records: Vec<(i64, String)> = {
-        let mut statement = tx
-            .prepare("SELECT sequence,record_json FROM journal ORDER BY sequence")
-            .map_err(storage_error)?;
-        statement
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(storage_error)?
-            .collect::<Result<_, _>>()
-            .map_err(storage_error)?
-    };
-    for (sequence, json) in records {
-        let record: JournalRecord = decode(&json)?;
-        let metadata = record_scope(&record, &state);
-        tx.execute("UPDATE journal SET session_id=?1,project_id=?2,command_id=?3,event_id=?4 WHERE sequence=?5", rusqlite::params![metadata.0,metadata.1,metadata.2,metadata.3,sequence]).map_err(storage_error)?;
+        let state = effective_state(&tx)?;
+        let records: Vec<(i64, String)> = {
+            let mut statement = tx
+                .prepare("SELECT sequence,record_json FROM journal ORDER BY sequence")
+                .map_err(storage_error)?;
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(storage_error)?
+                .collect::<Result<_, _>>()
+                .map_err(storage_error)?
+        };
+        for (sequence, json) in records {
+            let record: JournalRecord = decode(&json)?;
+            let metadata = record_scope(&record, &state);
+            tx.execute("UPDATE journal SET session_id=?1,project_id=?2,command_id=?3,event_id=?4 WHERE sequence=?5", rusqlite::params![metadata.0,metadata.1,metadata.2,metadata.3,sequence]).map_err(storage_error)?;
+        }
+        rebuild(&tx, &state)?;
     }
-    rebuild(&tx, &state)?;
     tx.pragma_update(None, "application_id", APPLICATION_ID)
         .map_err(storage_error)?;
     tx.pragma_update(None, "user_version", VERSION)
@@ -166,7 +170,7 @@ mod tests {
             db.connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
                 .unwrap(),
-            2
+            VERSION
         );
         assert_eq!(effective_state(&db.connection).unwrap(), state);
         assert_eq!(db.projects().unwrap()[0].name, "中文项目");
@@ -179,6 +183,36 @@ mod tests {
                 .unwrap(),
             fixture.records.len() as i64
         );
+        drop(db);
+
+        // An actual v2 database has no revision table. Migration retains its value and
+        // CAS uses the persisted edit identity rather than a schema or startup counter.
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE preference_revision; PRAGMA user_version=2;")
+            .unwrap();
+        drop(connection);
+        let mut db = Database::open(directory.path().to_path_buf()).unwrap();
+        assert_eq!(db.preferences().unwrap().unwrap().record, preferences);
+        assert_eq!(db.preference_revision().unwrap(), 1);
+        let mut changed = preferences.clone();
+        changed.zoom_percent = 125;
+        assert_eq!(
+            db.save_preferences_checked(Some(1), Versioned::new(changed.clone()))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.save_preferences_checked(Some(1), Versioned::new(preferences.clone()))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Conflict
+        );
+        assert_eq!(db.preferences().unwrap().unwrap().record, changed);
+        assert_eq!(effective_state(&db.connection).unwrap(), state);
+        drop(db);
+        let db = Database::open(directory.path().to_path_buf()).unwrap();
+        assert_eq!(db.preference_revision().unwrap(), 2);
         drop(db);
 
         let failed = tempfile::tempdir().unwrap();

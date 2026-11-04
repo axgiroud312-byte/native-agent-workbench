@@ -12,7 +12,7 @@ Issue #7；对应 R-11、R-14～R-21、R-29、R-33～R-36、R-38、R-40、R-43�
 npm install --prefix .local/agents/codex-acp-2.5.0 --save-exact --no-audit --no-fund @agentclientprotocol/codex-acp@2.5.0 @openai/codex@0.166.0
 ```
 
-`AgentDefinition.launch` 使用 native `node.exe`，参数为适配器 `dist/index.js` 的绝对路径；不直接启动 `.ps1`/`.cmd`，不在运行阶段调用 npx 下载。RuntimeOptions 可指定已解析的 native Codex exe，经子进程 CODEX_PATH 选择；不把 npm wrapper 当 exe。当前实现核对 initialize 返回的适配器名称与 2.5.0 版本，不冒用未经验证的其他版本映射。
+`AgentDefinition.launch` 使用 native `node.exe`，参数为适配器 `dist/index.js` 的绝对路径；不直接启动 `.ps1`/`.cmd`，不在运行阶段调用 npx 下载。产品默认移除继承的 CODEX_PATH，由该适配器自己的依赖解析配套 native Codex。RuntimeOptions 的明确 native 路径 override 只用于说明清楚的探针，不把 npm wrapper 当 exe。当前实现核对 initialize 返回的适配器名称与 2.5.0 版本，不冒用未经验证的其他版本映射。
 
 ## app 如何交付 effects
 
@@ -55,7 +55,7 @@ Authenticate 采用 SDK 5 的标准请求，只发送已报告且可用的 metho
 
 ## 资源与关闭
 
-Windows 使用 process-wrap 的 JobObject + KillOnDrop，先挂入自有 Job 再运行子进程；Node、Codex 与其后代均归该 Job。stdout 专供协议，stderr 独立消耗且不原样输出/持久化。关闭协议后给予短暂 EOF 宽限，再终止自有 Job 并检查首次 wait 的内部结果；只有核实释放才发 ResourcesReleased。清理不等待 app 事件消费者。
+Windows 使用本地修补的 process-wrap 10.0.1 的 JobObject + KillOnDrop，先挂入自有 Job 再运行子进程；Node、Codex 与其后代均归该 Job。stdout 专供协议，stderr 独立消耗且不原样输出/持久化。关闭协议后给予短暂 EOF 宽限，再终止自有 Job 并有界等待。补丁将父退出与 ACTIVE_PROCESS_ZERO 分别缓存，忽略其他完成通知，取消等待后再等仍可靠；只有核实整个 Job 已空才发 ResourcesReleased。清理不等待 app 事件消费者，Tokio 不遗留阻塞端口消费者。准确来源及保留许可见 `vendor/process-wrap/WORKBENCH_PATCH.md`。
 
 `shutdown().await` 请求停止并等待服务退出；app 仍须消费各连接的最终事实。超过清理期限会返回需核对错误，不能把停止请求当作成功。旧实例 abandoned_epoch 没有可核实所有权句柄时，ReconcileClosingResources 返回 Unconfirmed；不按进程名或猜测 PID 清理。跨实例持久所有权核对仍需后续恢复/退出整合。
 
@@ -72,3 +72,7 @@ cargo run --locked -p agent-runtime --example runtime_smoke --jobs 4 -- "$node" 
 已取得真实 SDK prompt/stream/cancel；共享 RuntimePort + reducer 的两会话实测覆盖交错输出、另一会话并行完成、配置结算、真实工具运行后停止、保留暂停队列和资源释放。该 CLI 的 journal 在内存中，不是 SQLite 验证。另有实际进程树快照与退出核对，以及新增非持久化认证发现实测。后续入队/映射调整通过必要定向检查，按集成负责人要求没有重复同一整套真实场景。
 
 尚未完成 app/UI 装配、实际浏览器/设备码登录闭环、真实审批/问题/steering/恢复与网络故障场景、原生图片输出、IME/DPI、托盘或用户验收。源码映射与纯检查不替代这些证据。
+
+#8 窄核验发现，旧开发适配器的最近 Codex 依赖为 0.165.0，#7 的真实 smoke 则显式指定了 native 0.166.0；这两项证据不能混为默认启动已验证。正式目录计划固定 2.5.0/0.166.0，独立安装及同目录真实连接由设置装配验收。
+
+进程修补单独通过无 Agent 的真实 Windows 场景验证：父进程正常退出而后代仍活着时，Job wait 保持等待；取消后 kill，try_wait 消费 empty 后再次 wait 成功，后代持有 stdout 达到 EOF。可复现命令为 `cargo run --locked -p agent-runtime --example job_cleanup_probe`。这不替代正式 Agent 或 npm 安装验收。

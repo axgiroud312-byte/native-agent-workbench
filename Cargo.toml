@@ -1,6 +1,14 @@
 [workspace]
-members = ["crates/app", "crates/workbench-core", "crates/agent-runtime", "crates/workbench-storage"]
+members = [
+    "crates/app",
+    "crates/workbench-core",
+    "crates/agent-runtime",
+    "crates/workbench-storage",
+    "crates/agent-catalog",
+    "crates/workbench-service",
+]
 default-members = ["crates/app"]
+exclude = ["vendor/process-wrap"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +20,9 @@ repository = "https://github.com/axgiroud312-byte/native-agent-workbench"
 
 [workspace.dependencies]
 gpui-kit = "=0.9.0"
+
+[patch.crates-io]
+process-wrap = { path = "vendor/process-wrap" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

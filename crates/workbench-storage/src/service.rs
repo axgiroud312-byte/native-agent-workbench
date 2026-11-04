@@ -97,11 +97,33 @@ impl WorkbenchService {
         self.storage
             .call(|db| Ok(effective_state(&db.connection)?.snapshot()))
     }
+    pub fn command_result(&self, id: CommandId) -> PortFuture<'static, Option<CommandResult>> {
+        self.storage
+            .call(move |db| Ok(effective_state(&db.connection)?.command_result(id).cloned()))
+    }
     pub fn preferences(&self) -> PortFuture<'_, Option<Versioned<WorkspacePreferences>>> {
         self.storage.read_preferences()
     }
     pub fn save_preferences(&self, preferences: WorkspacePreferences) -> PortFuture<'_, ()> {
         self.storage.write_preferences(Versioned::new(preferences))
+    }
+    /// Actual persisted edit revision, independent of Versioned's model schema version.
+    pub fn preferences_with_revision(&self) -> PortFuture<'static, (u64, WorkspacePreferences)> {
+        self.storage.call(|db| {
+            Ok((
+                db.preference_revision()?,
+                db.preferences()?.map(|v| v.record).unwrap_or_default(),
+            ))
+        })
+    }
+    pub fn save_preferences_if_revision(
+        &self,
+        expected: u64,
+        preferences: WorkspacePreferences,
+    ) -> PortFuture<'static, u64> {
+        self.storage.call(move |db| {
+            db.save_preferences_checked(Some(expected), Versioned::new(preferences))
+        })
     }
     pub fn execute(&self, command: CommandEnvelope) -> PortFuture<'static, CommittedUpdate> {
         self.storage

@@ -359,8 +359,54 @@ impl Database {
         &mut self,
         record: Versioned<WorkspacePreferences>,
     ) -> Result<(), BusinessError> {
-        self.connection.execute("INSERT INTO preferences VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json", [encode(&record)?]).map_err(storage_error)?;
-        Ok(())
+        self.save_preferences_checked(None, record).map(|_| ())
+    }
+    pub fn preference_revision(&self) -> Result<u64, BusinessError> {
+        self.connection
+            .query_row(
+                "SELECT revision FROM preference_revision WHERE id=1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(storage_error)
+            .and_then(|value| u64::try_from(value).map_err(storage_error))
+    }
+    pub fn save_preferences_checked(
+        &mut self,
+        expected: Option<u64>,
+        record: Versioned<WorkspacePreferences>,
+    ) -> Result<u64, BusinessError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let revision = tx
+            .query_row(
+                "SELECT revision FROM preference_revision WHERE id=1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(storage_error)?;
+        let revision = u64::try_from(revision).map_err(storage_error)?;
+        if expected.is_some_and(|value| value != revision) {
+            return Err(BusinessError::new(
+                ErrorKind::Conflict,
+                "workspace preferences changed; use the confirmed revision",
+                RetryAdvice::AfterCorrection,
+            ));
+        }
+        let next = revision
+            .checked_add(1)
+            .filter(|value| *value <= i64::MAX as u64)
+            .ok_or_else(|| storage_error("preference revision exhausted"))?;
+        tx.execute("INSERT INTO preferences VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET record_json=excluded.record_json", [encode(&record)?]).map_err(storage_error)?;
+        tx.execute(
+            "UPDATE preference_revision SET revision=?1 WHERE id=1",
+            [number(next)?],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(next)
     }
     pub fn history(&self, query: HistoryQuery) -> Result<HistoryPage, BusinessError> {
         if query.limit == 0 || query.limit > 500 {
@@ -680,12 +726,21 @@ fn save_state(connection: &Connection, state: &WorkbenchState) -> Result<(), Bus
             .record
             .expanded_projects
             .retain(|id| snapshot.projects.iter().any(|p| p.id == *id));
-        connection
-            .execute(
-                "UPDATE preferences SET record_json=?1 WHERE id=1",
-                [encode(&preferences)?],
-            )
-            .map_err(storage_error)?;
+        let encoded = encode(&preferences)?;
+        if encoded != text {
+            connection
+                .execute(
+                    "UPDATE preferences SET record_json=?1 WHERE id=1",
+                    [encoded],
+                )
+                .map_err(storage_error)?;
+            connection
+                .execute(
+                    "UPDATE preference_revision SET revision=revision+1 WHERE id=1",
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
     }
     connection
         .execute(

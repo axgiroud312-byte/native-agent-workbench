@@ -161,3 +161,7 @@ pub fn panel_radius() -> Rems {
 pub fn composer_radius() -> Rems {
     rems(10.0 / BASE_FONT)
 }
+
+pub fn settings_width(window: &gpui_kit::Window) -> Pixels {
+    window.rem_size() * (640.0 / BASE_FONT)
+}

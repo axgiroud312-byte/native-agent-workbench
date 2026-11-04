@@ -61,6 +61,7 @@ impl RuntimeOptions {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Explicit probe override. Product launches use each adapter's validated local dependency.
     pub fn with_codex_executable(mut self, path: PathBuf) -> Self {
         self.codex_executable = Some(path);
         self

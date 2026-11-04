@@ -1,96 +1,109 @@
-# 原生工作区组合（Issue #6）
+# 原生工作区与设置（Issue #6 / #8）
 
-本层建立可承载后续功能的 Windows 原生窗口。业务对象、身份与运行判断直接读取 `workbench_core` 快照；正式启动尚未连接存储和 Runtime，不表示完整 Agent 产品已经可用。
+原生双栏基础已经接入 `workbench-service::ApplicationService`。正式启动从真实存储恢复确认状态，设置操作通过后台目录、安装和认证接口执行。当前代码已通过定向编译；#8 的真实窗口、安装、登录和偏好重开验收仍需单独完成，不能由编译或 #6 样例窗口代替。
 
 ## 文件与状态归属
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.rs` | 应用初始化、快捷键、原生窗口尺寸与生命周期 |
-| `theme.rs` | 深色语义颜色、字体、间距、圆角、缩放与尺寸范围 |
-| `workbench.rs` | 双栏组合、保留的输入/树/滚动实体、Action、原生目录选择与设置 Dialog |
-| `sidebar.rs` | 项目菜单、虚拟化原生 Tree、会话状态、底部固定设置 |
-| `conversation.rs` | 会话上下文、空/错误状态、MessageScroller 与开发内容基础呈现 |
-| `composer.rs` | 固定输入容器、草稿文本、只读确认配置与待处理区域 |
-| `host.rs` | core 快照与视图偏好、带身份的 UI 意图边界 |
-| `fixture.rs` | 显式开发入口、共享 core 样例回放和额外布局状态 |
+| `main.rs` | 应用初始化、应用级所有者、快捷键、窗口与退出入口 |
+| `application.rs` | 后台 handle、单一确认快照订阅、待提交视图编辑、偏好/草稿保存、服务关闭 |
+| `host.rs` | UI 使用的 core 确认快照与当前会话；隔离的 fixture 来源 |
+| `theme.rs` | 深色语义色、字体、间距、圆角、缩放和尺寸范围 |
+| `workbench.rs` | 双栏组合、保留的 Tree/Textarea/各会话滚动实体、选择与 Action 路由 |
+| `sidebar.rs` | 项目菜单、原生虚拟 Tree、会话状态与底部设置 |
+| `conversation.rs` / `composer.rs` | 会话上下文、独立滚动内容、固定输入容器与草稿 |
+| `settings.rs` | 原生设置页签、手动配置表单、外观和工作区控件 |
+| `settings_agents.rs` | 目录、实际 Agent 状态、安装审阅、官方认证与按需原因 |
+| `fixture.rs` | 显式开发入口与共享 core 样例回放 |
 
-没有复制业务状态机。连接、执行、队列、权限与提问状态来自 `SessionSnapshot` / `SessionSummary`；不根据文本推断 Agent 能力。模型名优先按确认配置的 ID 查 Agent 返回的能力，找不到标签时保留原 ID。
+GPUI Global 只持有一个 `ApplicationState` Entity，后者持有可克隆 handle 和应用级 `ServiceSubscription` 任务。设置关闭或切换会话不会释放后台服务。数据和业务 reducer 仍由 core/storage 管线维护；UI 不直连 SQLite、SDK 或 Runtime，不拥有 effect 队列。
 
-GPUI 实体只保存交互状态：输入编辑器、树选择、分栏尺寸和每个 SessionId 的滚动位置。它们在 `Workbench::new` 建立，渲染时不新建这些实体，不启动文件、进程、网络或数据库操作。只在切换会话时设置对应草稿，普通重绘不重置输入。
+`WorkbenchHost::accept_confirmed` 只接收 service 的 workbench、active_session 和 preferences。生产路径没有临时目录代替 Project，也不执行本地 reducer。输入焦点、表单编辑、树选中、滚动和待提交文字属于视图状态，不能作为业务成功证据。
 
-## 表面、滚动与焦点
+## 窗口、滚动和焦点
 
-- 原生 TitleBar 保留 Windows 拖动及窗口控制按钮，背景融合到连续炭灰表面。
-- 默认逻辑尺寸 1240×800，最小 980×640。侧栏初始值来自 core 的 `WorkspacePreferences`（264），可拖至 240–320；以逻辑像素保存，防止字体缩放挤占对话。
-- 侧栏上方项目菜单、中间 Tree、底部设置。只有 Tree 的列表区域滚动，长名称截断，行使用真实图标和原生键盘导航。
-- 工作区上方是轻量会话上下文，中间 MessageScroller 独立滚动，底部 Composer 固定。待处理内容区域有高度上限并独立滚动，输入框自动增长到四行；后续完整表单仍在 #14 实现。
-- 对话滚动实体按 SessionId 保留，切换视图不改变运行或请求归属。工具折叠后重新测量高度，不主动抢输入焦点。
-- 菜单、设置 Dialog、按钮与文本输入使用 GPUI Kit 标准组件。设置 Dialog 使用库的焦点约束、Escape 关闭及关闭后焦点恢复；真实行为以窗口检查为准。
+- Windows TitleBar 保留拖动与原生窗口按钮，使用连续炭灰表面。
+- 默认逻辑尺寸 1240×800，最小 980×640。侧栏默认264、范围240–320，以逻辑像素保存；内部文字和间距按 rem 缩放。
+- 侧栏上方项目菜单、中间原生 Tree、底部固定设置。长名称截断，Tree 自管虚拟化、滚动与方向键。
+- 工作区是轻量上下文、独立 MessageScroller、固定 Composer。待处理区有高度上限，输入自动增长至四行。
+- Tree/Input/Scroller 实体在初始化时建立。订阅不会每个 token 重建它们；树只在结构或展开信息变化时更新。输入只在会话切换或可安全同步的确认变化时设置值。
+- 滚动实体按 SessionId 保留，内容数量变化使用 splice/append，必要时重新测量。工具展开不主动抢输入焦点。
+- 设置使用原生 Dialog、TabBar、Button、Input/Textarea 和文件选择器。设置只持表单/导航状态；标准 Dialog 处理焦点约束、Escape 与关闭恢复。手动配置与安装审阅在同一 Dialog 内返回 Agent 页，不从异步完成回调突然打开新模态框。
 
-所有颜色值集中于 `theme.rs`。仅深色主题；文字、内容间距与行高用 rem，窗口和侧栏边界用逻辑 px，分隔线保持细线。设置提供 100%、125%、150% 字体/界面尺度；这是应用内缩放，不代替 Windows DPI 验证。
+所有颜色集中于 `theme.rs`。本版只有炭灰深色主题，提供100/125/150%应用内缩放；应用缩放不等于 Windows DPI 已验收。
 
 | 快捷键 | 当前行为 |
 | --- | --- |
-| Ctrl+O | 原生目录选择器 |
+| Ctrl+O | 原生目录选择；成功后调用服务登记真实 Project |
 | Ctrl+, | 设置 |
-| Ctrl+Shift+E | 聚焦项目/会话树；方向键沿用 Tree 行为 |
+| Ctrl+Shift+E | 聚焦项目/会话树 |
 | Ctrl+L | 有会话时聚焦草稿 |
-| Ctrl+Q | 退出 |
-| Escape | 关闭当前标准弹层；具体由对应组件处理 |
+| Ctrl+Q | 请求应用后台关闭后退出 |
+| Escape | 关闭最上层标准弹层 |
 
-项目菜单、按钮和快捷键复用相同处理入口。未接入发送、停止、配置更改、审批或问题提交，因而不显示这些功能的可点击假按钮。
+完整项目/会话创建和删除属于 #9；发送、停止、会话配置、审批和问题提交仍由后续任务接入。本轮没有为这些未接通功能设置可点击假按钮。
 
-## 服务接入边界
+## 正式服务接线
 
-`WorkbenchHost` 当前持有 `WorkbenchSnapshot`、当前 `SessionSnapshot` 和 `WorkspacePreferences`。前端意图为 `UiIntent::Command(CommandEnvelope)` 或 `UiIntent::Preferences(WorkspacePreferences)`。草稿命令包含 SessionId、连接 epoch、CommandId、原草稿 revision；非文本草稿内容被保留。
+`ApplicationService::start(ServiceOptions)` 在后台完成恢复、Restart 和初始读取。默认使用系统应用数据目录；启动失败显示实际原因及重试入口，不回退为假空历史。应用只消费 `ServiceSnapshot`，其 `revision` 用于当前服务实例内的渲染顺序；业务 journal sequence、选择 generation 与持久 preferences_revision 各有独立含义。
 
-正式启动只发布空 core 快照。原生目录选择结果保存在当前窗口的临时目录上下文中，不生成 Project 记录、不假装已保存到数据库。视图偏好暂时只在当前窗口有效。生产命令入口在服务未接入时明确拒绝，不执行本地 reducer，不收集无人派发的 RuntimeEffects。
+服务负责先持久提交，再发布对应快照，随后按 sequence/ordinal 同步 enqueue effects，并在应用级并发 forward。UI 不直接调 Runtime，不等待长 Connect 完成才派发后续操作。接口和顺序详见 [应用后台服务](application-service.md)。
 
-后续服务适配集中在 host 层：
-1. 在 UI 线程外调用 #5 的 `WorkbenchService::execute / ingest / ingest_batch / session`。
-2. 只有持久化成功的 `CommittedUpdate` 才能替换显示快照；业务错误按返回结果展示。
-3. 将同一更新的 `CommittedEffect` 交 Runtime 所有者按 sequence、ordinal 派发，UI 不保管 effect 队列。
-4. 读取/保存 `WorkspacePreferences` 走服务接口；选会话取得对应快照后再同步保留的输入/滚动实体。
-5. 新增会话和内容时更新 Tree 项、对应 MessageScroller 数量；不要重建整个 Workbench 或在 render 中创建状态实体。
+| 操作 | UI 使用的真实接口与约束 |
+| --- | --- |
+| 初始读取/持续更新 | `snapshot / subscribe / current / changed`，保持一个应用级消费者 |
+| 目录选择 | `open_project(directory, name)`；只在确认快照更新后显示真实项目 |
+| 会话选择 | `select_session`；只读 `query_session` reply 不覆盖订阅的 active_session |
+| 偏好保存 | `save_preferences(expected_revision, preferences)`，使用实际持久 CAS 修订号 |
+| 草稿保存 | 对指定 SessionId 查询确认草稿，构造原 core SaveDraft 命令并保留 expected_revision、epoch、CommandId |
+| Agent 发现/刷新 | `discover_agents / refresh_agents` |
+| 手动配置 | `configure_agent(optional_id, name, ManualLaunch)` |
+| 安装 | `prepare_install(registry_id)` → 用户审阅 → `install(plan.id)` |
+| 认证 | `discover_authentication / authentication(scope, action)` |
+| 退出 | `shutdown`，保持订阅与服务所有者到关闭回复 |
 
-本轮未实现异步服务适配器及动态内容订阅；以上是下游接入位置与提交顺序约束，不表示生产服务已连接。无新的 core 字段、crate 或 Cargo 依赖。
+偏好编辑按目标字段合并并串行提交，显示选择值来自确认快照；保存中禁用对应设置控件，失败就近展示原因。Tree 展开与侧栏拖动也保存偏好，取消设置 Dialog 不撤销已确认的即时保存。
 
-### 当前源码接入位置（实窗后复核）
+连续草稿编辑按会话串行保存，后续输入保留在待提交文字中；未确认失败的文字不会被旧快照清掉。错误按 SessionId 呈现在对应会话，不串到另一会话。这里还没有发送入口：#10 必须先处理待保存草稿，再构造 Submit，不能凭方法调用顺序越过尚未完成的草稿查询/保存。
 
-| 边界 | 当前实际入口 | 后台装配时需要补上的部分 |
-| --- | --- | --- |
-| UI 意图 | `host.rs::UiIntent`、私有 `dispatch`；`save_draft_text` 构造带 revision 的 core 命令 | 用异步服务回调替换生产分支的 NotReady；不能把 fixture reducer 用作生产服务 |
-| 已提交数据 | `WorkbenchHost` 中的 core 快照与 `refresh`；后者当前只读 fixture | 发布 `CommittedUpdate.snapshot` 和同批 `sessions`，并保留未受影响会话；异步旧会话查询返回时按 SessionId/当前选择核对，不能覆盖新选择 |
-| 视图同步 | `Workbench::tree_items`、`sync_session`、保留的 Tree/Textarea/MessageScroller | 增量更新树和条目数量；流式快照刷新不能每次调用 `set_value` 重置正在编辑的输入 |
-| 视图偏好 | host 的选择、展开、宽度、缩放方法 | 汇入 `save_preferences`；本轮仍是窗口内状态，不是已持久化状态 |
-| 目录选择 | `open_project` 的异步选择器结果 | 调用服务 `open_project`，待成功后显示真实 Project；不用临时目录制造业务记录 |
+## 设置中的 Agent 流程
 
-已核对 #5 `CommittedUpdate` 包含 snapshot、受影响 sessions、decisions 和带 sequence/ordinal 的 effects；#7 实际入口为 `AgentRuntime::enqueue` / `RuntimeTicket::forward`，并实现 core `RuntimePort`。应用层应按提交顺序同步 enqueue，再在应用级任务中并发 forward；不能串行等待长寿命 Connect ticket 后才派发后续操作。未入队的 ticket 仍须 forward，保留可归属的失败事实。`RuntimeEventSink::emit` 回到服务 `ingest` 后才能发布新的已提交快照。任务生命期不依赖当前选中的会话视图。
+Agent 页首次打开执行本机发现；“刷新”才请求官方 Registry。目录离线或缓存状态如实显示，本机已配置 Agent 不因远端列表不可用而消失。已安装、已连接和已认证分别依据实际证据，不以目录条目存在代表任何一种成功。
 
-连续草稿编辑需要在接入时串行提交或合并尚未提交的文字，再使用最后确认的 revision 发下一次保存；不能让多次异步保存共享旧 revision。这个异步提交策略尚未由开发样例的同步保存证明。当前 app manifest 只有 GPUI Kit 与 core 依赖，存储/Runtime 装配依赖由主控统一加入。
+目录行只显示名称、版本和可用动作。不可安装项用原生“不可安装”按钮按需展开完整原因，默认没有重复的说明副行。展开仅是按 registry_id 保存的视图状态，不更改后台可安装性。实际错误和安装决策信息仍完整保留。
 
-## 开发入口与覆盖边界
+手动配置使用名称、启动程序和逐行参数；文件选择器选择真实程序，保存调用后台校验。没有环境或凭据表单。既有 AgentId 交服务复用，新配置身份由服务分配。安装/配置完成后服务持久化 PutAgent、发布目录并自动执行真实 initialize 发现，UI 不重复握手。
+
+安装审阅页直接使用后台 InstallPlan，展示：
+- 官方来源；
+- 适配器和 native Codex 的精确版本；
+- 安装目标及命令工作目录；
+- 实际程序和逐项参数；
+- 所有前置条件及其真实满足状态。
+
+只有用户点击“安装”才交回不透明 plan.id。界面不能修改 plan 后执行、静默下载或升级全局工具。计划不再有效时禁止确认；后台安装继续时可返回列表，返回不是取消安装。运行与失败状态来自后台和实际回复；未知清理/禁止重试由后台门槛执行，UI 不自动重试。
+
+## 非持久认证
+
+设置仅读取对应 Agent 的当前 Agent-only AuthenticationView。方法来自 Runtime 真实报告；不可用项展示原因并禁用，包含当前不支持的密钥输入。没有写死认证方法 ID，也不推断“打开浏览器”即认证成功。
+
+动作携带完整 AuthenticationScope、真实方法 ID 或 opaque interaction ID；提交前核对最新 scope、请求和交互是否仍存在，后台再次验证。状态、方法与交互仅随服务在内存中存在，不进入业务快照数据库、journal 或 WorkspacePreferences。认证 URL、秘密字段与 SDK responder 留在 Runtime，UI 只发 OpenOfficialFlow / Decline / Cancel。session 认证使用自己的真实连接 scope，不与设置 Agent-only epoch 混用。
+
+## 启动和验证边界
 
 ```powershell
 .\target\debug\agent-workbench.exe
+.\target\debug\agent-workbench.exe --data-root <绝对隔离数据目录>
 .\target\debug\agent-workbench.exe --dev-fixture
 .\target\debug\agent-workbench.exe --dev-fixture=contract
 .\target\debug\agent-workbench.exe --dev-fixture=empty
 ```
 
-也可显式设置环境变量 `AGENT_WORKBENCH_DEV_FIXTURE=rich|contract|empty`。日常正式启动不要设置该变量。样例窗口标题明确显示“开发样例”。
+开发样例也可通过 `AGENT_WORKBENCH_DEV_FIXTURE` 显式开启，标题显示“开发样例”；此时不启动正式服务，不读取生产数据库或安装/认证 Agent。样例设置只改变样例窗口。正式启动不要设置该变量。
 
-丰富样例复用 core 交错事件样例，再增加长中文项目名、多项目/会话、认证中、失败、待审批、提问、队列和长正文。样例草稿也经 core 命令更新；任何产生 RuntimeEffects 的操作都被拒绝。样例不启动真实 Agent，不写生产存储，也不证明真实认证或运行成功。
+#6 主控窗口记录证明了基础表面、中文多行自动输入、应用缩放和目录选择取消。它不证明 #8 接线后的设置流程，也不证明真实 IME 候选。当前 #8 应用定向编译和格式检查已通过；真实设置、安装、认证、偏好重开恢复仍待主控实测。
 
-当前内容呈现仅用于 #6 布局：文本/Markdown、附件名称、文件引用、工具摘要与折叠文本。完整流式更新、历史顺序、图片内容、计划、文件差异、完整问答/审批表单分别由后续 Issue 实现；不把本轮基础呈现当成这些功能验收。
+980×640、侧栏拖动、改键后树导航、草稿切换、滚动恢复、真实 IME/DPI 的未验证项继续保留。完整流式内容、历史顺序、图片、计划/差异、问答/审批并未由本轮基础呈现完成。关闭最后窗口当前请求退出，托盘与完整退出失败交互归后续桌面任务。
 
-## 设计依据与检查
-
-复用 `.local/coordination/reports/argon-preparation.md` 已完成的真实来源研究与 API 核对；采用连续双栏、独立对话滚动、固定输入区和少量必要状态。未照搬 Web/CSS API、装饰性渐变、多层大卡片或重复标题/完整路径说明。GPUI Kit 0.9.0 的实际 Tree、Textarea、MessageScroller、Resizable、TitleBar、Dialog API 已通过编译。
-
-基于 Design Guides 和 design-quality 清单，移除旧启动页的重复项目名、完整磁盘路径及开发口号；空状态保留主操作。无独立原型获用户确认。真实窗口证据和未覆盖项记录于 `.local/coordination/reports/ui-6.md`。
-
-主控真实窗口记录在 `.local/coordination/reports/ui-6-live.md`：已观察正式空状态、开发标识、中文多行输入、设置缩放与 Escape、原生目录选择与取消、正常退出。最小窗口、侧栏拖动、改键后的树导航、草稿切换、滚动恢复及真实 IME 仍待复查，未将应用内150%缩放等同于操作系统 DPI 验收。
-
-关闭最后窗口目前退出应用，托盘由后续任务实现。README 旧启动页验证范围需要主控在整合后更新；本轮未修改 README。
+源码行为优先于旧阶段描述：README 的“目录只展示、不保存、没有服务接线”部分需主控整合后更新。本轮不修改 README，不把局部实现或编译结果写成完整 MVP/用户验收。

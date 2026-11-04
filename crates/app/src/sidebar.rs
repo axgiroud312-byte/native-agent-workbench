@@ -24,14 +24,6 @@ impl Workbench {
             .host
             .selected_project()
             .map(|p| p.name.clone())
-            .or_else(|| {
-                self.host.temporary_directory().map(|p| {
-                    p.file_name()
-                        .unwrap_or(p.as_os_str())
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            })
             .unwrap_or_else(|| "打开项目…".into());
         let entity = cx.entity();
         let picker = Button::new("project-selector")
@@ -40,7 +32,7 @@ impl Workbench {
             .w_full()
             .icon(IconName::FolderOpen)
             .label(SharedString::from(picker_label))
-            .disabled(self.picker_open);
+            .disabled(self.picker_open || !self.host.is_fixture() && !self.service_ready(cx));
         let picker = if projects.is_empty() {
             picker
                 .on_click(
@@ -58,23 +50,7 @@ impl Workbench {
                                 .checked(selected == Some(id))
                                 .on_click(move |_, window, cx| {
                                     view.update(cx, |this, cx| {
-                                        this.host.select_project(id);
-                                        this.sync_session(window, cx);
-                                        if let Some(id) =
-                                            this.host.preferences().selected_session_id
-                                        {
-                                            this.session_tree.update(cx, |tree, cx| {
-                                                tree.set_selected_item(
-                                                    Some(
-                                                        &gpui_kit::component::tree::TreeItem::new(
-                                                            format!("session:{id}"),
-                                                            "",
-                                                        ),
-                                                    ),
-                                                    cx,
-                                                )
-                                            });
-                                        }
+                                        this.choose_project(id, window, cx);
                                         cx.notify();
                                     })
                                 }),

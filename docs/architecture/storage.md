@@ -6,9 +6,9 @@
 
 1. `SqliteStorage::open_default().await` 打开 OS 应用数据目录；`open_at(absolute_path)` 是显式应用配置/隔离测试入口。
 2. `WorkbenchService::start(storage, fresh_restart_id, at).await` 读取 checkpoint+tail，经 core replay 恢复，再事务提交 Restart。每个新 app 实例必须使用新的启动 CommandId；同一 worker 的同一启动 ID 可重复取得服务，其他启动所有者被拒绝。
-3. UI 使用 `open_project/create_session/select_project/select_session/remove_project/remove_session`，或统一 `execute(CommandEnvelope)`；Runtime 事实走 `ingest/ingest_batch`。
+3. 应用后台装配使用 `open_project/create_session/select_project/select_session/remove_project/remove_session`，或统一 `execute(CommandEnvelope)`；Runtime 事实走 `ingest/ingest_batch`。正式 UI 通过 [ApplicationService](application-service.md) 调用，不直接拥有 storage/runtime。
 4. 返回的 CommittedUpdate 含同一已提交状态的 WorkbenchSnapshot、受影响且仍存在的 SessionSnapshot、decisions、effects 和维护错误。每个 effect 带 sequence/ordinal，app 按该顺序交 Runtime；存储层不执行它们。不要再在 UI 自存 live_state/pending_effects。
-5. 查询使用 `snapshot/list_projects/project/list_sessions/session/messages`；`preferences/save_preferences` 保存布局、选择和展开偏好，不另建业务状态机。
+5. 查询使用 `snapshot/list_projects/project/list_sessions/session/messages`；`command_result(id)` 读取原持久决策，重复拒绝不会变成成功。`preferences_with_revision/save_preferences_if_revision` 对布局、选择和展开偏好执行真实持久修订号 CAS；低层 `preferences/save_preferences` 仍可用且所有写入同步递增修订号，不另建业务状态机。
 
 服务使用后台线程中的 core reducer 作为唯一业务更新逻辑。可以选用 WorkbenchService，或由 app 直接使用 StoragePort 配合自己持有的 core 状态；不要让两者同时充当业务更新所有者。低层 StoragePort.history 是内部日志分页，可能包含诊断；UI 读取 typed SessionSnapshot/MessagePage，不渲染原始事件 JSON。
 
@@ -22,7 +22,7 @@ Windows 默认 `%LOCALAPPDATA%/AgentWorkbench`；macOS 使用用户 Library/Appl
 
 ## schema 与显式转换
 
-业务版本 1、SQLite user_version 2 分开。数据库具有固定 application_id，非本应用数据库或未来版本拒绝打开，不清空、不重建、不生成备份。schema 只有本 crate 维护。
+业务版本 1、SQLite user_version 3 分开。数据库具有固定 application_id，非本应用数据库或未来版本拒绝打开，不清空、不重建、不生成备份。schema 只有本 crate 维护。
 
 | 表 | 职责与格式 |
 | --- | --- |
@@ -31,12 +31,13 @@ Windows 默认 `%LOCALAPPDATA%/AgentWorkbench`；macOS 使用用户 Library/Appl
 | project_index | 项目 ID、统一目录 key、展示名、Versioned<Project> 查询投影 |
 | session_index | 项目 FK、Versioned<SessionRecord>、Versioned<SessionSnapshot>；包含消息、草稿、队列、运行、请求、附件元数据的 typed 投影 |
 | preferences | 独立 Versioned<WorkspacePreferences> |
+| preference_revision | 实际偏好修改修订号；CAS、选择修改与删除清理均同步维护 |
 | blobs | 应用托管 blob ID、真实长度、pending_gc 状态 |
 | blob_refs | blob/会话/附件 ID，外键与计数用于所有权回收 |
 
 查询投影必须在同一事务内从 core 状态生成，禁止 UI 直接改 SQL 行。serde 转换都指定具体版本/类型，未知版本、损坏记录及 checkpoint 水位不匹配均报错，不静默回退成空历史。SQLite 恢复仅查询本数据库登记的会话，不扫描 Codex 历史。
 
-v1 定义原始 checkpoint/journal/preferences/blobs；v1→v2 真正 ALTER blobs 增加 pending_gc、重建 journal 增加关联字段、建立项目/会话/引用投影并回填历史。全部 DDL、回填、application_id/user_version 放在一个事务内；中途 SQL 或转换失败回滚原表、列、版本和数据，没有以 CREATE TABLE IF NOT EXISTS 代替迁移。实现依据 SQLite 的 [事务语义](https://www.sqlite.org/lang_transaction.html) 与 [应用自管 user_version](https://www.sqlite.org/pragma.html#pragma_user_version)。
+v1 定义原始 checkpoint/journal/preferences/blobs；v1→v2 真正 ALTER blobs 增加 pending_gc、重建 journal 增加关联字段、建立项目/会话/引用投影并回填历史。v2→v3 增加 preference_revision，保留既有偏好、业务记录和附件；已有偏好从修订号 1 开始，空偏好为 0。全部 DDL、回填、application_id/user_version 放在一个事务内；中途 SQL 或转换失败回滚原表、列、版本和数据，没有以 CREATE TABLE IF NOT EXISTS 代替迁移。实现依据 SQLite 的 [事务语义](https://www.sqlite.org/lang_transaction.html) 与 [应用自管 user_version](https://www.sqlite.org/pragma.html#pragma_user_version)。
 
 ## 提交与历史分页
 

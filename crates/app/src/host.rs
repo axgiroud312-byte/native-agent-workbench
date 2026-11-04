@@ -1,8 +1,5 @@
 use crate::fixture::{FixturePreset, build_fixture};
-use std::{
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 use workbench_core::{
     ApplyDisposition, ApplyMode, BusinessError, Command, CommandEnvelope, CommandId, ComposerDraft,
     ErrorKind, InputPart, JournalEntry, JournalRecord, ProjectId, RetryAdvice, Scope, SessionId,
@@ -20,14 +17,13 @@ struct FixtureSource {
     preset: FixturePreset,
 }
 
-/// Normal launch has only an empty committed snapshot. A picked directory is view context,
-/// never a manufactured Project record. Only the explicit fixture source runs a local reducer.
+/// Production receives committed snapshots from the application service. Only the
+/// explicit fixture source runs a local reducer; the two sources never share storage.
 pub struct WorkbenchHost {
     snapshot: WorkbenchSnapshot,
     active_session: Option<SessionSnapshot>,
     preferences: WorkspacePreferences,
     fixture: Option<FixtureSource>,
-    temporary_directory: Option<PathBuf>,
     error: Option<BusinessError>,
 }
 impl WorkbenchHost {
@@ -37,7 +33,6 @@ impl WorkbenchHost {
             active_session: None,
             preferences: WorkspacePreferences::default(),
             fixture: None,
-            temporary_directory: None,
             error: None,
         };
         if let Some(preset) = preset {
@@ -60,14 +55,25 @@ impl WorkbenchHost {
     pub fn active_preset(&self) -> Option<FixturePreset> {
         self.fixture.as_ref().map(|f| f.preset)
     }
+    pub fn is_fixture(&self) -> bool {
+        self.fixture.is_some()
+    }
+    pub fn accept_confirmed(
+        &mut self,
+        snapshot: WorkbenchSnapshot,
+        active_session: Option<SessionSnapshot>,
+        preferences: WorkspacePreferences,
+    ) {
+        if self.fixture.is_some() {
+            return;
+        }
+        self.snapshot = snapshot;
+        self.active_session = active_session;
+        self.preferences = preferences;
+        self.error = None;
+    }
     pub fn last_error(&self) -> Option<&BusinessError> {
         self.error.as_ref()
-    }
-    pub fn temporary_directory(&self) -> Option<&std::path::Path> {
-        self.temporary_directory.as_deref()
-    }
-    pub fn set_temporary_directory(&mut self, path: PathBuf) {
-        self.temporary_directory = Some(path);
     }
     pub fn selected_project(&self) -> Option<&workbench_core::Project> {
         let id = self.preferences.selected_project_id?;
@@ -127,34 +133,14 @@ impl WorkbenchHost {
         let Some(session) = &self.active_session else {
             return;
         };
-        if draft_plain_text(&session.draft) == text {
-            return;
-        }
-        let mut draft = session.draft.clone();
-        let expected_revision = draft.revision;
-        let Some(revision) = expected_revision.checked_add(1) else {
-            return;
-        };
-        draft.revision = revision;
-        draft.updated_at = now();
-        draft
-            .content
-            .retain(|part| !matches!(part, InputPart::Text { .. }));
-        if !text.is_empty() {
-            draft.content.insert(0, InputPart::Text { text });
-        }
-        let scope = Scope::session(session.record.id(), session.record.connection.epoch);
-        let command = CommandEnvelope::new(
-            CommandId::new(),
-            now(),
-            scope,
-            Command::SaveDraft {
-                draft,
-                expected_revision,
-            },
-        );
-        if let Err(error) = self.dispatch(UiIntent::Command(command)) {
-            self.error = Some(error);
+        match draft_command(session, text) {
+            Ok(Some(command)) => {
+                if let Err(error) = self.dispatch(UiIntent::Command(command)) {
+                    self.error = Some(error);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => self.error = Some(error),
         }
     }
     fn dispatch(&mut self, intent: UiIntent) -> Result<(), BusinessError> {
@@ -220,4 +206,34 @@ pub fn draft_plain_text(draft: &ComposerDraft) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+pub fn draft_command(
+    session: &SessionSnapshot,
+    text: String,
+) -> Result<Option<CommandEnvelope>, BusinessError> {
+    if draft_plain_text(&session.draft) == text {
+        return Ok(None);
+    }
+    let mut draft = session.draft.clone();
+    let expected_revision = draft.revision;
+    draft.revision = expected_revision.checked_add(1).ok_or_else(|| {
+        BusinessError::new(ErrorKind::Exhausted, "草稿版本已耗尽", RetryAdvice::Never)
+    })?;
+    draft.updated_at = now();
+    draft
+        .content
+        .retain(|part| !matches!(part, InputPart::Text { .. }));
+    if !text.is_empty() {
+        draft.content.insert(0, InputPart::Text { text });
+    }
+    Ok(Some(CommandEnvelope::new(
+        CommandId::new(),
+        now(),
+        Scope::session(session.record.id(), session.record.connection.epoch),
+        Command::SaveDraft {
+            draft,
+            expected_revision,
+        },
+    )))
 }

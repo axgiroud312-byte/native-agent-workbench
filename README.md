@@ -2,7 +2,7 @@
 
 Windows 优先的开源原生 Agent 工作台，使用 Rust、GPUI Kit 和 ACP，先把 Codex 的日常工作体验做好。
 
-**当前状态：共享业务契约、SQLite 存储、原生双栏基础和 Codex ACP 后端已实现。后端已有真实流式调用、停止和双会话证据；桌面界面与这些服务的完整接线正在开发，尚无正式安装包。**
+**当前状态：共享契约、SQLite、Codex ACP 后端、原生双栏及设置服务接线已实现并编译通过。后端已有真实流式调用、停止和双会话证据；本轮设置的真实安装/连接尚待窗口验证，完整会话与对话操作仍在开发。尚无正式安装包。**
 
 目标是一个不透明炭灰色、弱外框和弱顶栏的双栏窗口：左侧组织项目与会话，右侧完成输入、流式对话、工具执行、审批和结果查看。多个会话可在同一项目目录并行工作；关闭窗口后收进托盘继续运行。
 
@@ -39,15 +39,21 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --source wing
 cargo run --locked
 ```
 
-启动后显示炭灰双栏窗口，可点击“选择文件夹…”或按 `Ctrl+O` 打开系统文件夹选择器。选择只改变当前窗口的工作目录展示，不写入所选目录；当前尚不保存项目，也不能调用 Agent。`Ctrl+Q` 或关闭窗口退出程序，托盘行为属于后续开发。
+启动后显示炭灰双栏窗口。`Ctrl+O` 打开系统文件夹选择器，选定目录后通过后台服务保存项目索引；完整会话创建、删除与对话发送仍待后续接入。`Ctrl+Q` 或关闭窗口会请求退出，托盘行为属于后续开发。
 
 `Ctrl+L` 聚焦输入，`Ctrl+Shift+E` 聚焦导航，`Ctrl+,` 打开设置。设置支持 100/125/150% 应用缩放。开发者可以通过 `cargo run --locked -- --dev-fixture` 查看明确标记的布局样例；样例不调用 Agent，也不是用户历史。
+
+设置已接入 Agent 发现、Registry 缓存、手动配置、安装计划审阅与官方认证方法。安装仅在明确确认后执行，使用应用专有目录，固定当前验证组合 codex-acp **2.5.0** / Codex **0.166.0**。发现方法或打开官方登录页面不代表认证完成；会话能力与配置仍以 Agent 的实际报告为准。
+
+正式数据默认位于 `%LOCALAPPDATA%/AgentWorkbench`。开发验证可显式使用 `cargo run --locked -- --data-root <绝对数据目录>` 隔离数据；该参数与开发样例不同，仍会运行真实后台服务。
 
 目录结构：`crates/app/src/main.rs` 负责启动与生命周期，`theme.rs` 集中主题与尺寸，`workbench.rs` 组合原生窗口；侧栏、正文、输入和服务入口分别位于同目录模块。
 
 `crates/workbench-core` 提供独立于 UI、协议和数据库的共享业务类型、唯一状态更新器和异步服务接口；见 [业务对象说明](docs/architecture/domain-model.md) 与 [命令/事件契约](docs/architecture/contracts.md)。序列化和关键状态场景已有定向检查，不代表会话或 Agent 功能已可使用。
 
 `crates/workbench-storage` 提供后台 SQLite、迁移、项目/会话与附件保存，见 [存储边界](docs/architecture/storage.md)。`crates/agent-runtime` 提供独立进程、ACP 事件转换、取消与临时认证，见 [Runtime 用法及真实检查](docs/architecture/runtime.md)。窗口状态与接入约定见 [UI 架构](docs/architecture/ui.md)。
+
+`crates/workbench-service` 负责应用级提交顺序、事件回写与已确认快照，见 [应用服务](docs/architecture/application-service.md)。`crates/agent-catalog` 负责 [发现、缓存与安装](docs/architecture/agent-catalog.md)。UI 不持有另一套业务状态机。
 
 ## 本地开发技能
 
@@ -83,5 +89,7 @@ GitHub Actions 检查文档、Rust 格式和 Windows 构建，不额外上传 ex
 - SQLite 真实临时目录检查覆盖事务回滚、迁移、重开、共享附件与删除边界。
 - Codex ACP 后端在隔离目录完成真实流式输出、运行中停止和两个会话并行；跟踪的自有进程在结束后全部退出。
 - 原生窗口完成两行中文文本输入、应用缩放及选择器取消检查。自动输入中文不等于中文输入法候选组合验收。
+- 新应用服务检查覆盖真实 SQLite 偏好修改版本、旧值拒绝、切换归属、重复命令和已提交操作交付；当前设置接线已通过应用与 workspace 构建。
+- Registry 真实只读检查完成获取、工具发现与安装计划生成，尚未执行正式安装。Windows 自有进程检查验证了父进程先退出、后代仍存活时不会提前报告整组结束，以及取消等待后的正确清理。
 
-这些证据不代表完整 MVP 或视觉方案已获用户验收。界面与服务接线、真实登录交互、完整对话操作、重启恢复和托盘仍待后续实现与验证。
+这些证据不代表完整 MVP 或视觉方案已获用户验收。新设置的真实窗口/安装、登录交互、完整对话操作、重启恢复和托盘仍待后续实现与验证。

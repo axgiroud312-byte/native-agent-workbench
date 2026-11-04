@@ -1,12 +1,13 @@
 use crate::{
+    application::{ApplicationOwner, ApplicationState, PreferenceEdit},
     fixture::FixturePreset,
     host::{WorkbenchHost, draft_plain_text},
+    settings::SettingsView,
     theme,
 };
 use gpui_kit::component::{
-    ResizableState, Selectable as _, Sizable as _, TitleBar, WindowExt as _,
+    ResizableState, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    h_flex,
     input::{InputEvent, TextareaState},
     message_scroller::MessageScrollerState,
     resizable::{h_resizable, resizable_panel},
@@ -15,7 +16,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use std::collections::BTreeMap;
-use workbench_core::{ProjectId, SessionId};
+use workbench_core::{ProjectId, SessionId, ToolCallId};
 
 actions!(
     workbench,
@@ -31,6 +32,7 @@ actions!(
 pub struct Workbench {
     focus: FocusHandle,
     pub(crate) host: WorkbenchHost,
+    pub(crate) application: Entity<ApplicationState>,
     pub(crate) picker_open: bool,
     pub(crate) picker_error: Option<SharedString>,
     picker_task: Option<Task<()>>,
@@ -39,16 +41,18 @@ pub struct Workbench {
     pub(crate) composer_input: Entity<TextareaState>,
     pub(crate) message_scroller: Entity<MessageScrollerState>,
     scrollers: BTreeMap<SessionId, Entity<MessageScrollerState>>,
+    editor_session: Option<SessionId>,
+    settings: Option<Entity<SettingsView>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let application = cx.global::<ApplicationOwner>().0.clone();
         let host = WorkbenchHost::new(FixturePreset::from_env_or_args());
         let focus = cx.focus_handle();
         let split = cx.new(|_| ResizableState::default());
-        let items = Self::tree_items(&host);
-        let session_tree = cx.new(|cx| TreeState::new(cx).items(items));
+        let session_tree = cx.new(|cx| TreeState::new(cx).items(Self::tree_items(&host)));
         let composer_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("输入草稿…")
@@ -58,6 +62,7 @@ impl Workbench {
         let mut this = Self {
             focus,
             host,
+            application,
             picker_open: false,
             picker_error: None,
             picker_task: None,
@@ -66,14 +71,19 @@ impl Workbench {
             composer_input,
             message_scroller,
             scrollers: BTreeMap::new(),
+            editor_session: None,
+            settings: None,
             _subscriptions: Vec::new(),
         };
         this.sync_session(window, cx);
-        if let Some(id) = this.host.preferences().selected_session_id {
-            this.session_tree.update(cx, |tree, cx| {
-                tree.set_selected_item(Some(&TreeItem::new(format!("session:{id}"), "")), cx)
-            });
-        }
+        this.select_tree_item(cx);
+        this._subscriptions.push(cx.observe_in(
+            &this.application,
+            window,
+            |this, _, window, cx| {
+                this.sync_application(window, cx);
+            },
+        ));
         this._subscriptions.push(cx.observe_in(
             &this.session_tree,
             window,
@@ -83,17 +93,16 @@ impl Workbench {
                     if let Some(raw) = id.strip_prefix("session:") {
                         if let Ok(id) = raw.parse::<SessionId>() {
                             if this.host.preferences().selected_session_id != Some(id) {
-                                this.host.select_session(id);
-                                this.sync_session(window, cx);
+                                this.choose_session(id, window, cx);
                             }
                         }
                     } else if let Some(raw) = id.strip_prefix("project:") {
                         if let Ok(id) = raw.parse::<ProjectId>() {
-                            this.host.select_project(id);
-                            this.sync_session(window, cx);
+                            if this.host.preferences().selected_project_id != Some(id) {
+                                this.choose_project(id, window, cx);
+                            }
                         }
                     }
-                    cx.notify();
                 }
             },
         ));
@@ -106,7 +115,16 @@ impl Workbench {
                 };
                 if let Some(raw) = id.strip_prefix("project:") {
                     if let Ok(id) = raw.parse() {
-                        this.host.set_project_expanded(id, expanded);
+                        if this.host.is_fixture() {
+                            this.host.set_project_expanded(id, expanded);
+                        } else {
+                            this.application.update(cx, |app, cx| {
+                                app.save_preference(
+                                    PreferenceEdit::ProjectExpanded(id, expanded),
+                                    cx,
+                                )
+                            });
+                        }
                     }
                 }
                 cx.notify();
@@ -115,12 +133,35 @@ impl Workbench {
         this._subscriptions.push(
             cx.subscribe(&this.composer_input, |this, input, event, cx| {
                 if let InputEvent::Change = event {
-                    this.host
-                        .save_draft_text(input.read(cx).value().to_string());
+                    let Some(id) = this.editor_session else {
+                        return;
+                    };
+                    let text = input.read(cx).value().to_string();
+                    let expected = this
+                        .application
+                        .read(cx)
+                        .draft_text(id)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            this.host
+                                .active_session()
+                                .filter(|s| s.record.id() == id)
+                                .map(|s| draft_plain_text(&s.draft))
+                        });
+                    if expected.as_deref() == Some(text.as_str()) {
+                        return;
+                    }
+                    if this.host.is_fixture() {
+                        this.host.save_draft_text(text);
+                    } else {
+                        this.application
+                            .update(cx, |app, cx| app.save_draft(id, text, cx));
+                    }
                     cx.notify();
                 }
             }),
         );
+        this.sync_application(window, cx);
         window.focus(&this.focus, cx);
         this
     }
@@ -143,11 +184,119 @@ impl Workbench {
             .collect()
     }
 
-    pub(crate) fn sync_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self
+    fn select_tree_item(&self, cx: &mut Context<Self>) {
+        let key = self
+            .host
+            .preferences()
+            .selected_session_id
+            .map(|id| format!("session:{id}"))
+            .or_else(|| {
+                self.host
+                    .preferences()
+                    .selected_project_id
+                    .map(|id| format!("project:{id}"))
+            });
+        self.session_tree.update(cx, |tree, cx| {
+            let item = key.map(|key| TreeItem::new(key, ""));
+            tree.set_selected_item(item.as_ref(), cx);
+        });
+    }
+
+    fn sync_application(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host.is_fixture() {
+            cx.notify();
+            return;
+        }
+        let Some(snapshot) = self.application.read(cx).confirmed.clone() else {
+            cx.notify();
+            return;
+        };
+        let old = self.host.snapshot();
+        let structure_changed = old.projects.iter().map(|p| (&p.id, &p.name)).ne(snapshot
+            .workbench
+            .projects
+            .iter()
+            .map(|p| (&p.id, &p.name)))
+            || old
+                .sessions
+                .iter()
+                .map(|s| (&s.id, &s.project_id, &s.title))
+                .ne(snapshot
+                    .workbench
+                    .sessions
+                    .iter()
+                    .map(|s| (&s.id, &s.project_id, &s.title)));
+        let expansion_changed =
+            self.host.preferences().expanded_projects != snapshot.preferences.expanded_projects;
+        let selection_changed = self.host.preferences().selected_session_id
+            != snapshot.preferences.selected_session_id
+            || self.host.preferences().selected_project_id
+                != snapshot.preferences.selected_project_id;
+        let zoom_changed =
+            self.host.preferences().zoom_percent != snapshot.preferences.zoom_percent;
+        let old_draft = self
             .host
             .active_session()
-            .map(|s| draft_plain_text(&s.draft))
+            .map(|s| draft_plain_text(&s.draft));
+        let content_changed = self.host.active_session().map(|s| (&s.messages, &s.tools))
+            != snapshot
+                .active_session
+                .as_ref()
+                .map(|s| (&s.messages, &s.tools));
+        self.host.accept_confirmed(
+            snapshot.workbench.clone(),
+            snapshot.active_session.clone(),
+            snapshot.preferences.clone(),
+        );
+        if structure_changed || expansion_changed {
+            let items = Self::tree_items(&self.host);
+            self.session_tree
+                .update(cx, |tree, cx| tree.set_items(items, cx));
+        }
+        if structure_changed || expansion_changed || selection_changed {
+            self.select_tree_item(cx);
+        }
+        let new_id = self.host.active_session().map(|s| s.record.id());
+        if self.editor_session != new_id {
+            self.sync_session(window, cx);
+        } else if let Some(session) = self.host.active_session() {
+            let text = self
+                .application
+                .read(cx)
+                .draft_text(session.record.id())
+                .map(str::to_owned)
+                .unwrap_or_else(|| draft_plain_text(&session.draft));
+            let value = self.composer_input.read(cx).value().to_string();
+            if value != text && old_draft.as_deref() == Some(value.as_str()) {
+                self.composer_input
+                    .update(cx, |input, cx| input.set_value(text, window, cx));
+            }
+            self.update_scroller_count(cx);
+        }
+        if content_changed {
+            self.message_scroller.update(cx, |s, cx| s.remeasure(cx));
+        }
+        if zoom_changed {
+            for scroller in self.scrollers.values() {
+                scroller.update(cx, |s, cx| s.remeasure(cx));
+            }
+        }
+        if let Some(settings) = &self.settings {
+            settings.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn sync_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor_session = self.host.active_session().map(|s| s.record.id());
+        let text = self
+            .editor_session
+            .and_then(|id| self.application.read(cx).draft_text(id).map(str::to_owned))
+            .or_else(|| {
+                self.host
+                    .active_session()
+                    .map(|s| draft_plain_text(&s.draft))
+            })
             .unwrap_or_default();
         self.composer_input
             .update(cx, |input, cx| input.set_value(text, window, cx));
@@ -159,12 +308,109 @@ impl Workbench {
                 .entry(id)
                 .or_insert_with(|| cx.new(|cx| MessageScrollerState::new(count, cx)))
                 .clone();
+            self.update_scroller_count(cx);
         }
         cx.notify();
     }
 
+    fn update_scroller_count(&self, cx: &mut Context<Self>) {
+        if let Some(session) = self.host.active_session() {
+            let count = session.messages.len() + session.tools.len();
+            self.message_scroller.update(cx, |scroller, cx| {
+                let previous = scroller.item_count();
+                if count > previous {
+                    scroller.append(count - previous, cx);
+                } else if count < previous {
+                    scroller.splice(count..previous, 0, cx);
+                }
+            });
+        }
+    }
+
+    pub(crate) fn choose_project(
+        &mut self,
+        id: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host.is_fixture() {
+            self.host.select_project(id);
+            self.sync_session(window, cx);
+            self.select_tree_item(cx);
+        } else {
+            self.application.update(cx, |app, cx| {
+                app.save_preference(PreferenceEdit::Project(id), cx)
+            });
+        }
+        cx.notify();
+    }
+    fn choose_session(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.host.is_fixture() {
+            self.host.select_session(id);
+            self.sync_session(window, cx);
+        } else {
+            self.application
+                .update(cx, |app, cx| app.select_session(Some(id), cx));
+        }
+        cx.notify();
+    }
+    pub(crate) fn set_zoom(&mut self, percent: u16, cx: &mut Context<Self>) {
+        if self.host.is_fixture() {
+            let mut prefs = self.host.preferences().clone();
+            prefs.zoom_percent = theme::apply_zoom_percent(percent, cx);
+            self.host.update_preferences(prefs);
+            for scroller in self.scrollers.values() {
+                scroller.update(cx, |s, cx| s.remeasure(cx));
+            }
+        } else {
+            self.application.update(cx, |app, cx| {
+                app.save_preference(PreferenceEdit::Zoom(percent), cx)
+            });
+        }
+        cx.notify();
+    }
+    pub(crate) fn set_sidebar_width(&mut self, value: u16, cx: &mut Context<Self>) {
+        let value = theme::clamp_sidebar_width_logical(value, None);
+        if self.host.preferences().sidebar_width == value {
+            return;
+        }
+        if self.host.is_fixture() {
+            let mut prefs = self.host.preferences().clone();
+            prefs.sidebar_width = value;
+            self.host.update_preferences(prefs);
+        } else {
+            self.application.update(cx, |app, cx| {
+                app.save_preference(PreferenceEdit::Sidebar(value), cx)
+            });
+        }
+        cx.notify();
+    }
+    pub(crate) fn toggle_tool(&mut self, id: ToolCallId, cx: &mut Context<Self>) {
+        if self.host.is_fixture() {
+            self.host.toggle_tool_expanded(id);
+        } else {
+            let expanded = !self.host.preferences().expanded_tools.contains(&id);
+            self.application.update(cx, |app, cx| {
+                app.save_preference(PreferenceEdit::ToolExpanded(id, expanded), cx)
+            });
+        }
+        self.message_scroller.update(cx, |s, cx| s.remeasure(cx));
+        cx.notify();
+    }
+    pub(crate) fn service_ready(&self, cx: &App) -> bool {
+        self.application.read(cx).handle.is_some()
+    }
+    pub(crate) fn service_error(&self, cx: &App) -> Option<String> {
+        let app = self.application.read(cx);
+        app.error.clone().or_else(|| {
+            app.confirmed
+                .as_ref()
+                .and_then(|s| s.last_error.as_ref().map(|e| e.message.clone()))
+        })
+    }
+
     pub(crate) fn open_project(&mut self, _: &OpenProject, _: &mut Window, cx: &mut Context<Self>) {
-        if self.picker_open {
+        if self.picker_open || self.host.is_fixture() || !self.service_ready(cx) {
             return;
         }
         self.picker_open = true;
@@ -175,22 +421,39 @@ impl Workbench {
             multiple: false,
             prompt: Some("选择项目文件夹".into()),
         });
+        let handle = self
+            .application
+            .read(cx)
+            .handle
+            .clone()
+            .expect("checked service");
+        let application = self.application.clone();
         self.picker_task = Some(cx.spawn(async move |this, cx| {
-            let result = response.await;
+            let result = match response.await {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        let name = path
+                            .file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy()
+                            .into_owned();
+                        handle
+                            .open_project(path, name)
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.message)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Ok(Ok(None)) => Ok(()),
+                Ok(Err(error)) => Err(format!("无法打开文件夹：{error}")),
+                Err(_) => Err("文件夹选择器已断开，请重试。".into()),
+            };
+            application.update(cx, |app, cx| app.read_latest(cx));
             let _ = this.update(cx, |this, cx| {
                 this.picker_open = false;
-                match result {
-                    Ok(Ok(Some(paths))) => {
-                        if let Some(path) = paths.into_iter().next() {
-                            this.host.set_temporary_directory(path);
-                        }
-                    }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => {
-                        this.picker_error = Some(format!("无法打开文件夹：{error}").into())
-                    }
-                    Err(_) => this.picker_error = Some("文件夹选择器已断开，请重试。".into()),
-                }
+                this.picker_error = result.err().map(Into::into);
                 cx.notify();
             });
         }));
@@ -203,38 +466,23 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let zoom = entity.read(cx).host.preferences().zoom_percent;
+        let settings = self
+            .settings
+            .get_or_insert_with(|| {
+                let owner = cx.weak_entity();
+                cx.new(|cx| SettingsView::new(owner, window, cx))
+            })
+            .clone();
+        let opening = settings.clone();
+        cx.spawn(async move |_, cx| {
+            opening.update(cx, |settings, cx| settings.on_open(cx));
+        })
+        .detach();
+        window.open_dialog(cx, move |dialog, window, _| {
             dialog
                 .title("设置")
-                .child(
-                    v_flex()
-                        .gap_4()
-                        .child(h_flex().justify_between().child("外观").child("炭灰"))
-                        .child(v_flex().gap_2().child("界面缩放").child(
-                            h_flex().gap_2().children([100u16, 125, 150].map(|percent| {
-                                let entity = entity.clone();
-                                Button::new(("zoom", usize::from(percent)))
-                                    .outline()
-                                    .small()
-                                    .selected(zoom == percent)
-                                    .label(format!("{percent}%"))
-                                    .on_click(move |_, _, cx| {
-                                        entity.update(cx, |this, cx| {
-                                            let mut prefs = this.host.preferences().clone();
-                                            prefs.zoom_percent =
-                                                theme::apply_zoom_percent(percent, cx);
-                                            this.host.update_preferences(prefs);
-                                            for scroller in this.scrollers.values() {
-                                                scroller.update(cx, |s, cx| s.remeasure(cx));
-                                            }
-                                            cx.notify();
-                                        })
-                                    })
-                            })),
-                        )),
-                )
+                .w(theme::settings_width(window))
+                .child(settings.clone())
                 .footer(
                     Button::new("settings-done")
                         .primary()
@@ -243,7 +491,6 @@ impl Workbench {
                 )
         });
     }
-
     fn focus_composer(&mut self, _: &FocusComposer, window: &mut Window, cx: &mut Context<Self>) {
         if self.host.active_session().is_some() {
             self.composer_input
@@ -304,12 +551,11 @@ impl Render for Workbench {
                     .on_resize(move |state, window, cx| {
                         if let Some(width) = state.read(cx).sizes().first().copied() {
                             view.update(cx, |this, cx| {
-                                let mut prefs = this.host.preferences().clone();
-                                prefs.sidebar_width = theme::clamp_sidebar_width_logical(
+                                let width = theme::clamp_sidebar_width_logical(
                                     f32::from(width).round() as u16,
                                     Some(window.bounds().size.width),
                                 );
-                                this.host.update_preferences(prefs);
+                                this.set_sidebar_width(width, cx);
                                 cx.notify();
                             });
                         }

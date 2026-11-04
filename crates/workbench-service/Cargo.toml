@@ -1,0 +1,23 @@
+[package]
+name = "workbench-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Application-owned background workbench service for the native app"
+
+[dependencies]
+workbench-core = { path = "../workbench-core" }
+workbench-storage = { path = "../workbench-storage" }
+agent-runtime = { path = "../agent-runtime" }
+agent-catalog = { path = "../agent-catalog" }
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -61,8 +61,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(session) = self.host.active_session().cloned() else {
-            let has_directory =
-                self.host.temporary_directory().is_some() || self.host.selected_project().is_some();
+            let has_directory = self.host.selected_project().is_some();
             return v_flex()
                 .id("conversation-empty")
                 .flex_1()
@@ -78,7 +77,11 @@ impl Workbench {
                             .outline()
                             .icon(IconName::FolderOpen)
                             .label("打开项目…")
-                            .disabled(self.picker_open)
+                            .disabled(
+                                self.picker_open
+                                    || self.host.is_fixture()
+                                    || !self.service_ready(cx),
+                            )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_project(&OpenProject, window, cx)
                             })),
@@ -95,6 +98,26 @@ impl Workbench {
                 .when_some(self.picker_error.clone(), |col, error| {
                     col.child(div().text_sm().text_color(cx.theme().danger).child(error))
                 })
+                .when(self.application.read(cx).starting, |col| {
+                    col.child(div().text_sm().child("正在打开工作区…"))
+                })
+                .when_some(self.service_error(cx), |col, error| {
+                    col.child(
+                        v_flex()
+                            .gap_2()
+                            .child(div().text_sm().text_color(cx.theme().danger).child(error))
+                            .when(!self.service_ready(cx), |col| {
+                                col.child(
+                                    Button::new("retry-workspace")
+                                        .outline()
+                                        .label("重试")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.application.update(cx, |app, cx| app.start(cx))
+                                        })),
+                                )
+                            }),
+                    )
+                })
                 .into_any_element();
         };
         let banner = match &session.record.connection.phase {
@@ -107,6 +130,11 @@ impl Workbench {
                 .or_else(|| session.errors.last())
                 .map(|e| e.message.clone()),
         };
+        let draft_error = self
+            .application
+            .read(cx)
+            .draft_error(session.record.id())
+            .map(str::to_owned);
         let messages = session.messages.clone();
         let tools = session.tools.clone();
         let attachments = session.attachments.clone();
@@ -118,6 +146,16 @@ impl Workbench {
             .min_h_0()
             .min_w_0()
             .w_full()
+            .when_some(draft_error, |col, reason| {
+                col.child(
+                    div()
+                        .px_6()
+                        .py_2()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(reason),
+                )
+            })
             .when_some(banner, |col, reason| {
                 col.child(
                     div()
@@ -396,9 +434,7 @@ fn render_tool_row(
                             .label(SharedString::from(tool.name.clone()))
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |this, cx| {
-                                    this.host.toggle_tool_expanded(tid);
-                                    this.message_scroller.update(cx, |s, cx| s.remeasure(cx));
-                                    cx.notify();
+                                    this.toggle_tool(tid, cx);
                                 })
                             }),
                     )

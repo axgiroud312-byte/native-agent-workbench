@@ -43,6 +43,10 @@ impl OwnedProcess {
                 .stderr(Stdio::piped());
             if let Some(path) = &options.codex_executable {
                 cmd.env("CODEX_PATH", path);
+            } else {
+                // Product launches bind to this adapter's own validated npm dependency.
+                // An inherited global override could silently select another Agent's engine.
+                cmd.env_remove("CODEX_PATH");
             }
         });
         command.wrap(KillOnDrop);
@@ -95,9 +99,9 @@ impl OwnedProcess {
         ))
     }
     pub async fn close(mut self) -> Result<(), BusinessError> {
-        // Protocol EOF gets a short grace period. Then terminate the owned job/group
-        // before its FIRST wait: process-wrap caches the parent exit status during wait,
-        // so cancelling a wait and waiting again cannot prove descendant exit.
+        // Protocol EOF gets a short grace period. Then terminate the owned job/group.
+        // The local process-wrap patch requires both parent exit and Job-empty proof,
+        // including after a cancelled wait; ResourcesReleased follows that proof.
         tokio::time::sleep(Duration::from_millis(250)).await;
         let termination = self.child.start_kill();
         let exited = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
