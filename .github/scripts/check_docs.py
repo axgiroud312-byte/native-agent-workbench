@@ -1,4 +1,4 @@
-"""Check this documentation-only repository without building the future app."""
+"""Check specification structure and local links independently of application builds."""
 
 from pathlib import Path
 import re
