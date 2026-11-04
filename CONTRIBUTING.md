@@ -1,6 +1,6 @@
 # 贡献约定
 
-当前阶段先维护一份连贯的 [MVP Spec](docs/specs/native-agent-workbench-mvp.md)。应用尚未实现，欢迎围绕具体需求或兼容性证据提出 Issue。
+当前已有 Rust + GPUI Kit 最小启动工程，业务范围由 [MVP Spec](docs/specs/native-agent-workbench-mvp.md) 定义。欢迎围绕具体需求或兼容性证据提出 Issue。
 
 ## 开始一项工作
 
@@ -11,9 +11,9 @@
 
 ## 检查
 
-当前文档检查：`python .github/scripts/check_docs.py` 和 `git diff --check`。
+当前检查：`cargo fmt --all --check`、`cargo build --locked --workspace`、`python .github/scripts/check_docs.py` 和 `git diff --check`。
 
-实现 Rust 应用后，为改动运行适当的 `cargo fmt`、编译、Clippy 和针对性测试。真实窗口的中文输入、缩放、选择、滚动、托盘、Agent 调用需要单独给证据，不用模拟通过替代实际验证。
+业务实现后再为有价值的行为添加针对性测试，按变更需要运行 Clippy。真实窗口的中文输入、缩放、选择、滚动、托盘、Agent 调用需要单独给证据，不用模拟通过替代实际验证。
 
 避免无关重构、重复测试、大型临时产物和包含私人信息的截图或日志。未执行的检查写明未执行，不补写不存在的结果。
 
