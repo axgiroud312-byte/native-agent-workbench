@@ -24,7 +24,7 @@ for reference in set(re.findall(r"\b(?:R|AC)-\d+\b", spec)):
     if reference not in definitions:
         errors.append(f"Undefined Spec reference: {reference}")
 
-files = [ROOT / name for name in ("README.md", "AGENTS.md", "CONTRIBUTING.md")]
+files = sorted(ROOT.glob("*.md"))
 files += sorted((ROOT / "docs").rglob("*.md"))
 files += sorted((ROOT / ".github").rglob("*.md"))
 for path in files:

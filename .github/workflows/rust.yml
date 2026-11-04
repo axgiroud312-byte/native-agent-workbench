@@ -25,9 +25,3 @@ jobs:
         run: cargo fmt --all --check
       - name: Build native Windows application
         run: cargo build --locked --workspace
-      - name: Upload development executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-workbench-windows-dev
-          path: target/debug/agent-workbench.exe
-          retention-days: 3

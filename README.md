@@ -10,6 +10,7 @@ Windows 优先的开源原生 Agent 工作台，使用 Rust、GPUI Kit 和 ACP�
 - [贡献与验证约定](CONTRIBUTING.md)
 - [Agent 开发约定](AGENTS.md)
 - [MIT 许可证](LICENSE)
+- [图标与依赖来源](THIRD_PARTY_NOTICES.md)
 
 ## 交互方向
 
@@ -60,6 +61,14 @@ python .github/scripts/check_docs.py
 git diff --check
 ```
 
-GitHub Actions 检查文档、Rust 格式和 Windows 构建。开发版 exe 仅作为短期构建验证产物保留，不是正式发布包。
+GitHub Actions 检查文档、Rust 格式和 Windows 构建，不额外上传 exe 或制作安装包。
 
-真实窗口与目录选择的本机检查结果将在初始化验证完成后记录。MVP 中的 Agent 调用、中文输入框、托盘和持久化仍待实现及验收。
+2026-11-04 已验证：
+
+- Windows x64 本机 `cargo build --locked --workspace --jobs 4` 成功，云端 Windows 构建也通过。
+- 真实窗口能启动，炭灰双栏、中文文字和文件夹 SVG 图标正常显示。
+- 鼠标打开系统选择器并选择含中文名称的本地目录后，侧栏与主区同步显示目录。
+- `Ctrl+O` 重新打开选择器；Escape 取消后保留原目录，并恢复按钮可用状态。
+- `Alt+F4` 关闭窗口后进程退出，没有遗留启动工程进程。
+
+这些是初始化工程的运行检查，不代表 MVP 或视觉方案已获用户验收。Agent 调用、中文输入框/输入法、托盘和持久化仍待实现及验收。
