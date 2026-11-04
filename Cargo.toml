@@ -19,4 +19,3 @@ unsafe_code = "forbid"
 # Keep local development output smaller; ship release builds separately.
 [profile.dev]
 debug = 0
-
