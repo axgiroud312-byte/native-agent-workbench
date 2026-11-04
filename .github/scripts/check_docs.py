@@ -10,21 +10,21 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = ROOT / "docs/specs/native-agent-workbench-mvp.md"
 errors = []
 spec = SPEC.read_text(encoding="utf-8")
-expected_headings = ["想实现什么", "为什么选择这个方案", "我想要什么", "我不想要什么"]
+expected_headings = ["想实现什么", "为什么选择这个方案", "我想要什么"]
 if re.findall(r"^## (.+)$", spec, re.MULTILINE) != expected_headings:
-    errors.append("Spec must use the four to-spec sections in order")
+    errors.append("Spec must use the three project-approved sections in order")
 
-definitions = re.findall(r"\*\*((?:R|N|AC)-\d+)\*\*", spec)
+definitions = re.findall(r"\*\*((?:R|AC)-\d+)\*\*", spec)
 if len(definitions) != len(set(definitions)):
     errors.append("Duplicate requirement or acceptance ID")
-for prefix in ("R-", "N-", "AC-"):
+for prefix in ("R-", "AC-"):
     if not any(item.startswith(prefix) for item in definitions):
         errors.append(f"Missing {prefix} definitions")
-for reference in set(re.findall(r"\b(?:R|N|AC)-\d+\b", spec)):
+for reference in set(re.findall(r"\b(?:R|AC)-\d+\b", spec)):
     if reference not in definitions:
         errors.append(f"Undefined Spec reference: {reference}")
 
-files = [ROOT / name for name in ("README.md", "AGENTS.md", "CONTRIBUTING.md")]
+files = sorted(ROOT.glob("*.md"))
 files += sorted((ROOT / "docs").rglob("*.md"))
 files += sorted((ROOT / ".github").rglob("*.md"))
 for path in files:
