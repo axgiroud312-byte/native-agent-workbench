@@ -1,0 +1,41 @@
+# Build and editor output
+/target/
+/dist/
+/.idea/
+/.vscode/
+*.pdb
+*.exe
+*.msi
+*.msix
+__pycache__/
+*.py[cod]
+
+# Machine-local agent installs and runtime data
+/.agents/
+/.codex/
+/.claude/
+/.local/
+/runtime/
+/logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+auth.json
+credentials.json
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Cargo.lock should be committed when the desktop application is implemented.
